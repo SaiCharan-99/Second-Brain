@@ -1,0 +1,39 @@
+# ── Secrets ─────────────────────────────────────────────────────────────
+# EC-G4. This entry exists before any key is ever written. Do not remove.
+config.toml
+*.key
+*.pem
+credentials.json
+token.json
+local.properties
+
+# ── Runtime data (lives in ~/.secondbrain, but never commit a stray copy) ─
+sessions/
+logs/
+index.db
+app.db
+calibration.json
+*.db-shm
+*.db-wal
+
+# ── Build output ────────────────────────────────────────────────────────
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.kotlin/
+out/
+*.class
+*.jar
+!gradle-wrapper.jar
+
+# ── IDE ─────────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# ── OS ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

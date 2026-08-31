@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logging for the Step 1 voice harness.
+
+  Note for editors: XML forbids a double hyphen inside a comment. An earlier
+  version of this file used one, logback silently rejected the whole config, and
+  every logger fell back to its default level. That is not cosmetic here, for the
+  reason in point 1 below.
+
+  Two things are deliberate, not incidental:
+
+  1. Ktor's own loggers are at WARN. The Logging plugin installed in
+     HttpClients.kt runs at LogLevel.INFO and every message it emits passes
+     through SecretRedactor, but Ktor's internal loggers are a separate channel
+     that the redactor never sees. At DEBUG they print request headers verbatim,
+     Gemini key included, into this file. That is the hard prohibition in
+     CLAUDE.md, and the library default is what violates it.
+
+  2. The file appender writes outside the repository, under the app root. The
+     repo lives inside OneDrive on this machine, and cloud-syncing a file that
+     has anything to do with API keys is the wrong default.
+-->
+<configuration>
+
+    <property name="LOG_DIR" value="${SECONDBRAIN_LOG_DIR:-${user.home}/.secondbrain/logs}"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %-24logger{0} %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/second-brain.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/second-brain.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>14</maxHistory>
+            <totalSizeCap>200MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %-32logger{0} %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Our own code. -->
+    <logger name="com.secondbrain" level="DEBUG"/>
+
+    <!-- Redacted HTTP summaries from HttpClients.kt. Safe. -->
+    <logger name="http" level="DEBUG"/>
+
+    <!-- Library internals. See point 1 above before raising either of these. -->
+    <logger name="io.ktor" level="WARN"/>
+    <logger name="io.netty" level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+</configuration>

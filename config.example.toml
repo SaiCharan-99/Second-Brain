@@ -1,0 +1,156 @@
+# Second Brain — configuration template
+#
+# COPY THIS FILE, DO NOT EDIT IT IN PLACE.
+#
+#   Windows:  copy config.example.toml %USERPROFILE%\.secondbrain\config.toml
+#   macOS/Linux:  cp config.example.toml ~/.secondbrain/config.toml
+#
+# Then fill in the two keys marked REQUIRED.
+#
+# config.toml is in .gitignore and must never be committed (EC-G4). This file —
+# config.example.toml — is committed and must never contain a real key.
+#
+# Every value here can also be supplied as an environment variable, which wins
+# over the file:  SECONDBRAIN_<SECTION>_<KEY>  e.g. SECONDBRAIN_STT_API_KEY.
+#
+# R7: every cap and threshold in the system lives in this file. If you find a
+# number hardcoded in Kotlin or written into a prompt, that is a bug.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[paths]
+# Root for the vault, index.db, app.db, sessions and logs.
+# "~" is expanded against the user home — Windows has no shell expansion for it.
+root = "~/.secondbrain"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[stt]
+# Gemini. REQUIRED — both of these.
+#
+# EC-G3: the model id lives here, never in code. A 404 from Gemini names this key.
+# The exact model string is spike S1.1; confirm it before trusting this default.
+model   = "gemini-2.5-flash"
+api_key = ""                                   # REQUIRED  <-- your Gemini API key
+
+base_url = "https://generativelanguage.googleapis.com"
+
+# EC-V6: above this, audio must go through the Files API instead of inline
+# base64. The real cutover is a spike S1.1 answer.
+inline_limit_bytes = 18000000
+
+# E8: STT is read-only and idempotent, so retrying is correct. This is NOT the
+# R5 no-auto-retry rule, which governs irreversible actions only.
+max_attempts       = 3
+initial_backoff_ms = 500
+request_timeout_ms = 60000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[tts]
+# Kokoro. REQUIRED — model, voice and base_url.
+#
+# STATUS: the endpoint contract is spike S1.2 and is NOT yet confirmed. The
+# client implements the OpenAI-compatible POST /v1/audio/speech shape that
+# kokoro-fastapi and the common hosted deployments expose. If your provider
+# differs, this section and KokoroTts.kt both change.
+model    = "kokoro"
+voice    = "af_heart"
+base_url = ""                                  # REQUIRED  <-- e.g. http://localhost:8880
+api_key  = ""                                  # optional; sent as a bearer token
+
+# The JVM ships no MP3 decoder, so "wav" (or "pcm") is required unless you add
+# a decode dependency. Asking for mp3 fails with a message naming this key.
+response_format = "wav"
+speed           = 1.0
+
+max_attempts       = 3
+initial_backoff_ms = 500
+request_timeout_ms = 60000
+
+# EC-T3: Kokoro cold start is audible dead air. Play a soft cue after this long.
+thinking_cue_after_ms = 1500
+
+# EC-T4: when the endpoint is unreachable, speak through the local platform
+# voice (Windows SAPI) rather than failing silently.
+fallback_enabled = true
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[audio]
+sample_rate_hz = 16000
+
+# Substring match against the OS device name, case-insensitive. Leave empty for
+# the system default. Unplugging a matched device falls back automatically (EC-V9).
+# On this laptop the options are:
+#   capture : "Microphone (Realtek(R) Audio)" | "Headset (EarPods)"
+#   playback: "Speakers (Realtek(R) Audio)"   | "Headset (EarPods)"
+preferred_capture_device  = ""
+preferred_playback_device = ""
+
+capture_chunk_ms  = 50
+# EC-V3: playback writes in slices this small so stop() can cut audio inside
+# 100 ms. Raising this directly degrades barge-in responsiveness.
+playback_chunk_ms = 40
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[gate]
+# PUSH_TO_TALK | ENERGY_VAD
+# PUSH_TO_TALK is the default and the only validated mode. ENERGY_VAD is built
+# but its threshold is unmeasured (E13) — EC-V2 exists because energy
+# endpointing cuts people off mid-sentence.
+mode = "PUSH_TO_TALK"
+
+# EC-V1: below EITHER of these, the recording is discarded with zero API cost.
+min_utterance_ms = 400
+# EC-V6 / E6: hard ceiling. On hitting it, capture stops and what we have is
+# transcribed — truncating a thought beats losing it.
+max_utterance_ms = 60000
+
+# E4: the noise floor is MEASURED at startup (see calibration_ms) and cached in
+# ~/.secondbrain/calibration.json. This is the margin above that floor which
+# counts as speech. Raise it in a noisy room, lower it if quiet speech is dropped.
+energy_margin_db = 12.0
+calibration_ms   = 500
+
+# ENERGY_VAD only. EC-V2 says 1200 ms, not 500 — a mid-sentence pause must not
+# endpoint the utterance.
+vad_silence_timeout_ms = 1200
+
+# ── EC-V3 barge-in ──
+# KEYPRESS | ENERGY | DISABLED
+#
+# E3: KEYPRESS is the default because there is no acoustic echo cancellation
+# anywhere in the JVM. With mic and speaker on one headset, ENERGY makes the
+# microphone hear our own TTS and the assistant interrupts itself in a loop.
+barge_in = "KEYPRESS"
+
+# ENERGY only: ignore the first N ms after playback starts.
+barge_in_grace_ms = 300
+# ENERGY only: by default it additionally requires capture and playback to be
+# physically different devices. Do not set this true without reading E3.
+allow_energy_barge_in_same_device = false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[sessions]
+# E1. ARCHITECTURE.md §2 says sessions rotate at 30 days; Step 1's build list
+# reads as "delete the WAV once the transcript commits". Both are expressible.
+#
+# The default keeps the audio, because it is the only dataset for measuring STT
+# accuracy on real Indian-English and code-switched speech — which is the whole
+# point of Step 1. Swept at startup, not on a timer.
+retention_days = 30
+
+# When true, the WAV is deleted the moment its transcript commits. R10 forbids
+# deleting it any earlier under any setting, and FAILED/EMPTY audio is always
+# kept regardless of this flag.
+delete_wav_on_commit = false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[speech]
+# EC-T2: hard cap on spoken output, truncated at a sentence boundary. A prompt
+# saying "keep it short" is not a cap (R7).
+max_speech_seconds = 60
