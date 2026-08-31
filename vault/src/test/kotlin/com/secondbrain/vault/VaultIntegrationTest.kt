@@ -45,18 +45,27 @@ class VaultIntegrationTest {
         folder: String = "Inbox",
         title: String,
         body: String = "",
-        summary: String = "a summary",
+        // Derived from the title rather than a shared constant. One shared
+        // summary across every fixture made them all look like duplicates of
+        // each other once the D-053 guard existed - which was the guard being
+        // right and the fixture being lazy.
+        summary: String = "a summary about $title",
         tags: List<String> = listOf("test"),
     ) = NoteDraft(folder, title, tags, summary, body, NoteSource.VOICE)
 
+    /**
+     * @param confirmNew set where a test deliberately writes a near-identical note
+     *        and the duplicate guard would correctly refuse it.
+     */
     private suspend fun write(
         folder: String = "Inbox",
         title: String,
         body: String = "",
+        confirmNew: Boolean = false,
     ): WriteResult.Written =
         assertInstanceOf(
             WriteResult.Written::class.java,
-            vault.writeNote(draft(folder = folder, title = title, body = body)),
+            vault.writeNote(draft(folder = folder, title = title, body = body), confirmNew = confirmNew),
         )
 
     @Nested
@@ -111,9 +120,11 @@ class VaultIntegrationTest {
         @Test
         @DisplayName("EC-N1 three notes with the same title on the same day")
         fun `slug collisions on disk`() = runTest {
-            val a = write(title = "Same Title")
-            val b = write(title = "Same Title")
-            val c = write(title = "Same Title")
+            // Deliberately identical titles; confirmNew because this test is about
+            // slug suffixing, not duplicate detection.
+            val a = write(title = "Same Title", confirmNew = true)
+            val b = write(title = "Same Title", confirmNew = true)
+            val c = write(title = "Same Title", confirmNew = true)
 
             assertEquals("Inbox/same-title.md", a.path)
             assertEquals("Inbox/same-title-2.md", b.path)
@@ -215,7 +226,7 @@ class VaultIntegrationTest {
         @DisplayName("D-030 an ambiguous target stays dangling with both candidates recorded")
         fun `ambiguous stays dangling`() = runTest {
             write(folder = "Projects", title = "Notes")
-            write(folder = "People", title = "Notes")
+            write(folder = "People", title = "Notes", confirmNew = true)
 
             val citing = write(folder = "Inbox", title = "Cites", body = "See [[Notes]].")
 
@@ -459,10 +470,11 @@ class VaultIntegrationTest {
         @Test
         @DisplayName("F10 the design board's rollup: Projects 23 = 9 + 7 + 7")
         fun `rollup counts`() = runTest {
-            repeat(9) { write(folder = "Projects/BluePrint Lens", title = "bpl $it") }
-            repeat(7) { write(folder = "Projects/Positioning", title = "pos $it") }
-            repeat(7) { write(folder = "Projects/Second Brain", title = "sb $it") }
-            repeat(4) { write(folder = "Inbox", title = "inbox $it") }
+            // Titles that differ only by an index; the guard rightly flags them.
+            repeat(9) { write(folder = "Projects/BluePrint Lens", title = "bpl $it", confirmNew = true) }
+            repeat(7) { write(folder = "Projects/Positioning", title = "pos $it", confirmNew = true) }
+            repeat(7) { write(folder = "Projects/Second Brain", title = "sb $it", confirmNew = true) }
+            repeat(4) { write(folder = "Inbox", title = "inbox $it", confirmNew = true) }
 
             val tree = vault.tree()
             val projects = tree.children.single { it.name == "Projects" }
@@ -480,7 +492,7 @@ class VaultIntegrationTest {
         @Test
         fun `the dangling badge counts links from notes in a folder`() = runTest {
             write(folder = "Projects/Positioning", title = "a", body = "[[Missing One]] and [[Missing Two]]")
-            write(folder = "Inbox", title = "b", body = "no links")
+            write(folder = "Inbox", title = "b", body = "no links", confirmNew = true)
 
             val tree = vault.tree()
             val positioning = tree.children
@@ -549,8 +561,8 @@ class VaultIntegrationTest {
             vault.createFolder("Project") // a rejection, for the audit trail
             write(folder = "Projects", title = "BluePrint Lens", body = "The other project.")
             write(folder = "Projects", title = "The moat", body = "Relates to [[BluePrint Lens]] and [[Nothing]].")
-            write(folder = "Inbox", title = "Same Title")
-            write(folder = "Inbox", title = "Same Title")
+            write(folder = "Inbox", title = "Same Title", confirmNew = true)
+            write(folder = "Inbox", title = "Same Title", confirmNew = true)
             write(folder = "Inbox", title = "Pricing: a positioning problem", body = "Colons in titles.")
         }
 

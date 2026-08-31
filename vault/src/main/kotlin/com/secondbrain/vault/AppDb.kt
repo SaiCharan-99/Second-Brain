@@ -27,10 +27,13 @@ import java.time.Instant
  * `index.db`'s copy is rebuilt from here. There is no reconciliation path to get
  * wrong.
  *
- * Steps 3, 5 and 6 add `conversations`, `messages`, `action_ledger`,
- * `oauth_tokens` and `cost_meter` as migrations 2, 3, ... The alternative was
- * discovering at Step 5 that the action ledger's database has no migration path,
- * which is the worst possible table to learn that on (F24 / D-037).
+ * `:agent` owns the other tables in this same file - `conversations`,
+ * `messages`, `cost_meter`, and the Step 5 action ledger - and neither module may
+ * see the other, so the two coordinate through a `schema_migrations(module,
+ * version)` table rather than the single `user_version` pragma (D-045). The
+ * migration runner exists now rather than at Step 5 because discovering that the
+ * action ledger's database has no migration path is the worst possible table to
+ * learn that on (F24 / D-037).
  */
 class AppDb(
     private val file: Path,
@@ -55,48 +58,76 @@ class AppDb(
         }
 
     companion object {
+        const val MODULE: String = "vault"
+
         /** Bump when adding a migration. Never renumber an existing one. */
         const val SCHEMA_VERSION: Int = 1
     }
 
     init {
+        ensureMigrationsTable()
         migrate()
     }
 
     /**
-     * Applies migrations from the current `user_version` up to [SCHEMA_VERSION].
+     * Shared coordination point with `:agent`, which owns its own tables in this
+     * same file.
+     *
+     * The `user_version` pragma holds one integer, so it cannot represent two
+     * independent migration lineages - and `app.db` has two owners because
+     * `folder_decisions` is ours while `conversations`, `messages`, `cost_meter`
+     * and the Step 5 action ledger are `:agent`'s. Neither module may see the
+     * other, so they coordinate through this table instead. `IF NOT EXISTS`
+     * because whichever module opens the file first has to create it (D-045).
+     */
+    private fun ensureMigrationsTable() {
+        connection.createStatement().use { s ->
+            s.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                  module   TEXT PRIMARY KEY,
+                  version  INTEGER NOT NULL,
+                  applied_at TEXT NOT NULL
+                )
+                """.trimIndent()
+            )
+        }
+    }
+
+    /**
+     * Applies migrations from this module's recorded version up to [SCHEMA_VERSION].
      *
      * Forward-only and idempotent. A database from the future is a hard failure
      * rather than a silent downgrade: running an older build against a newer
      * `app.db` would corrupt data it does not understand.
      */
     private fun migrate() {
-        val current = userVersion()
+        val current = currentVersion()
 
         if (current > SCHEMA_VERSION) {
             throw IllegalStateException(
-                "app.db at " + file + " is at schema version " + current + " but this build " +
-                    "only understands " + SCHEMA_VERSION + ". This database was written by a newer " +
-                    "version of Second Brain. app.db is not rebuildable - do not delete it. " +
-                    "Use a matching build, or migrate deliberately."
+                "app.db at " + file + " holds '" + MODULE + "' schema version " + current +
+                    " but this build only understands " + SCHEMA_VERSION + ". This database was " +
+                    "written by a newer version of Second Brain. app.db is not rebuildable - do " +
+                    "not delete it. Use a matching build, or migrate deliberately."
             )
         }
 
         if (current == SCHEMA_VERSION) {
-            log.debug("app.db schema version {} - up to date", current)
+            log.debug("app.db module '{}' at schema version {} - up to date", MODULE, current)
             return
         }
 
-        log.info("Migrating app.db from schema version {} to {}", current, SCHEMA_VERSION)
+        log.info("Migrating app.db module '{}' from schema version {} to {}", MODULE, current, SCHEMA_VERSION)
         connection.autoCommit = false
         try {
             if (current < 1) migrateTo1()
-            setUserVersion(SCHEMA_VERSION)
+            recordVersion(SCHEMA_VERSION)
             connection.commit()
-            log.info("app.db migrated to schema version {}", SCHEMA_VERSION)
+            log.info("app.db module '{}' migrated to schema version {}", MODULE, SCHEMA_VERSION)
         } catch (e: Exception) {
             connection.rollback()
-            throw IllegalStateException("app.db migration failed and was rolled back: " + e.message, e)
+            throw IllegalStateException("app.db '" + MODULE + "' migration failed and was rolled back: " + e.message, e)
         } finally {
             connection.autoCommit = true
         }
@@ -121,15 +152,24 @@ class AppDb(
         }
     }
 
-    fun userVersion(): Int =
-        connection.createStatement().use { s ->
-            s.executeQuery("pragma user_version").use { rs ->
-                if (rs.next()) rs.getInt(1) else 0
-            }
+    fun currentVersion(): Int =
+        connection.prepareStatement("SELECT version FROM schema_migrations WHERE module = ?").use { ps ->
+            ps.setString(1, MODULE)
+            ps.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
         }
 
-    private fun setUserVersion(v: Int) {
-        connection.createStatement().use { it.execute("pragma user_version=" + v) }
+    private fun recordVersion(version: Int) {
+        connection.prepareStatement(
+            """
+            INSERT INTO schema_migrations(module, version, applied_at) VALUES (?,?,?)
+            ON CONFLICT(module) DO UPDATE SET version=excluded.version, applied_at=excluded.applied_at
+            """.trimIndent()
+        ).use { ps ->
+            ps.setString(1, MODULE)
+            ps.setInt(2, version)
+            ps.setString(3, Instant.now().toString())
+            ps.executeUpdate()
+        }
     }
 
     /**

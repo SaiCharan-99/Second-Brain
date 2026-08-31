@@ -13,6 +13,9 @@ sqlite              = "3.53.4.0"
 # Pinned to the version transliteration was validated against (D-029). Any-Latn
 # on Telugu/Devanagari was verified before this dependency was accepted.
 icu4j               = "77.1"
+# Official Anthropic SDK for the JVM. Kotlin uses the Java SDK. Supersedes
+# ARCHITECTURE.md section 7's "Ktor" for the Claude transport - see D-044.
+anthropic           = "2.59.0"
 
 [libraries]
 kotlinx-coroutines-core    = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core",    version.ref = "coroutines" }
@@ -28,6 +31,7 @@ ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx
 
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
 icu4j       = { module = "com.ibm.icu:icu4j",      version.ref = "icu4j" }
+anthropic   = { module = "com.anthropic:anthropic-java", version.ref = "anthropic" }
 
 slf4j-api        = { module = "org.slf4j:slf4j-api",         version.ref = "slf4j" }
 logback-classic  = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }

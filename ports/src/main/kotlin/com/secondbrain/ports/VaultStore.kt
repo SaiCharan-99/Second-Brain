@@ -44,8 +44,16 @@ interface VaultStore {
      */
     suspend fun createFolder(path: String): FolderVerdict
 
-    /** Renders and writes a new note. Returns its vault-relative path. */
-    suspend fun writeNote(draft: NoteDraft): WriteResult
+    /**
+     * Renders and writes a new note.
+     *
+     * EC-N9 / D-053: the write is refused when the note looks like a duplicate of
+     * one already in the vault, and the rejection names the match so the model can
+     * append to it instead. Set [confirmNew] to write anyway — two genuinely
+     * distinct thoughts about one subject must stay writable, so the guard is a
+     * question rather than a wall.
+     */
+    suspend fun writeNote(draft: NoteDraft, confirmNew: Boolean = false): WriteResult
 
     /**
      * Appends to an existing note under a heading.
@@ -83,5 +91,11 @@ sealed interface WriteResult {
      * The write did not happen. [reason] is structured so it can go back to the
      * model as a `tool_result` it can act on.
      */
-    data class Rejected(val reason: String, val detail: String) : WriteResult
+    data class Rejected(
+        val reason: String,
+        val detail: String,
+        /** Set on a `duplicate` rejection: the note this one looked like. */
+        val existingPath: String? = null,
+        val score: Double? = null,
+    ) : WriteResult
 }

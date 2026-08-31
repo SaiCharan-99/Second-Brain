@@ -23,11 +23,13 @@ data class AppConfig(
     val sessions: SessionsConfig = SessionsConfig(),
     val speech: SpeechConfig = SpeechConfig(),
     val vault: VaultConfig = VaultConfig(),
+    val agent: AgentConfig = AgentConfig(),
 ) {
     /** Safe to log. Secrets replaced, everything else intact. */
     fun redacted(): AppConfig = copy(
         stt = stt.copy(apiKey = MASK),
         tts = tts.copy(apiKey = tts.apiKey?.let { MASK }),
+        agent = agent.redacted(),
     )
 
     companion object {

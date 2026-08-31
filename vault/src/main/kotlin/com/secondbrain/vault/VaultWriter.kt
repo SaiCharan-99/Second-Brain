@@ -34,6 +34,7 @@ class VaultWriter(
     private val slugifier: Slugifier = Slugifier(config.maxSlugLength),
     private val folderGuard: FolderGuard = FolderGuard(config, slugifier),
     private val linkResolver: LinkResolver = LinkResolver(config),
+    private val duplicateGuard: DuplicateGuard = DuplicateGuard(config),
 ) {
 
     private val log = LoggerFactory.getLogger(VaultWriter::class.java)
@@ -117,8 +118,45 @@ class VaultWriter(
 
     // ── notes ───────────────────────────────────────────────────────────────
 
-    /** Renders and writes a new note. R1: [NoteRenderer] produces the bytes. */
-    suspend fun writeNote(draft: NoteDraft, now: Instant = Instant.now()): Outcome = lock.withLock {
+    /** Thrown when the duplicate guard refuses a write. Carries what the model needs. */
+    class DuplicateNoteException(
+        val existingPath: String,
+        val existingTitle: String,
+        val score: Double,
+        val matchedOn: String,
+    ) : Exception(
+        "'" + existingTitle + "' at " + existingPath + " already covers this (" + matchedOn +
+            " similarity " + "%.2f".format(score) + "). Append to it, or set confirm_new to write anyway."
+    )
+
+    /**
+     * Renders and writes a new note. R1: [NoteRenderer] produces the bytes.
+     *
+     * EC-N9 / D-053: refuses a probable duplicate unless [confirmNew] is set. The
+     * check is here rather than in the prompt for the same reason the Folder Guard
+     * is here - a prompt instruction to search first does not survive contact.
+     */
+    suspend fun writeNote(
+        draft: NoteDraft,
+        now: Instant = Instant.now(),
+        confirmNew: Boolean = false,
+    ): Outcome = lock.withLock {
+        if (!confirmNew) {
+            val candidates = index.allNotes().map {
+                DuplicateGuard.Candidate(it.path, it.title, it.summary)
+            }
+            val verdict = duplicateGuard.evaluate(draft.title, draft.summary, candidates)
+            if (verdict is DuplicateGuard.Verdict.Duplicate) {
+                log.info(
+                    "Duplicate guard refused '{}': {} similarity {} to {}",
+                    draft.title, verdict.matchedOn, "%.2f".format(verdict.score), verdict.existingPath,
+                )
+                throw DuplicateNoteException(
+                    verdict.existingPath, verdict.existingTitle, verdict.score, verdict.matchedOn,
+                )
+            }
+        }
+
         val folder = draft.folder.trim().ifEmpty { VaultRoot.INBOX }
 
         // R4: every path-bearing argument, without exception.

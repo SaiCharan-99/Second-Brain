@@ -202,14 +202,24 @@ object ConfigLoader {
         "max_folder_depth", "max_top_level_folders", "max_slug_length",
         "tree_default_depth", "tree_folder_listing_cap", "watch_debounce_ms",
         "atomic_move_attempts", "atomic_move_backoff_ms",
+        // agent
+        "max_tokens", "max_iterations", "max_tool_executions", "max_self_corrections",
+        "context_window_turns", "cache_block_interval",
     )
     private val knownDecimal = setOf(
         "energy_margin_db", "speed",
         // vault
         "folder_similarity_threshold", "folder_jaccard_weight", "link_fuzzy_threshold",
+        "duplicate_similarity_threshold", "duplicate_jaccard_weight",
+        // agent
+        "session_usd_ceiling", "session_usd_warn_at",
+        "input_usd_per_mtok", "output_usd_per_mtok",
+        "cache_write_multiplier", "cache_read_multiplier",
     )
     private val knownBoolean = setOf(
         "allow_energy_barge_in_same_device", "delete_wav_on_commit", "fallback_enabled",
+        // agent
+        "thinking_enabled", "cache_enabled", "prewarm_cache",
     )
 
     internal fun toJsonObject(table: Map<String, Map<String, String>>): String = buildString {

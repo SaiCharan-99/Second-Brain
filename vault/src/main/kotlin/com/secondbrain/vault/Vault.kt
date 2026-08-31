@@ -70,6 +70,7 @@ class Vault(
                 slugifier = slugifier,
                 folderGuard = FolderGuard(config, slugifier),
                 linkResolver = linkResolver,
+                duplicateGuard = DuplicateGuard(config),
             )
             val scanner = VaultScanner(root, index, appDb, config, linkResolver)
 
@@ -98,8 +99,8 @@ class Vault(
     override suspend fun createFolder(path: String): FolderVerdict =
         writer.createFolder(path)
 
-    override suspend fun writeNote(draft: NoteDraft): WriteResult = runWrite {
-        writer.writeNote(draft)
+    override suspend fun writeNote(draft: NoteDraft, confirmNew: Boolean): WriteResult = runWrite {
+        writer.writeNote(draft, confirmNew = confirmNew)
     }
 
     override suspend fun appendNote(path: String, heading: String, markdown: String): WriteResult = runWrite {
@@ -155,6 +156,14 @@ class Vault(
             WriteResult.Rejected("unsafe_path", e.reason)
         } catch (e: java.nio.file.NoSuchFileException) {
             WriteResult.Rejected("not_found", "no note at '" + e.file + "'")
+        } catch (e: VaultWriter.DuplicateNoteException) {
+            // A rejection the model is expected to act on, not a failure.
+            WriteResult.Rejected(
+                reason = "duplicate",
+                detail = e.message.orEmpty(),
+                existingPath = e.existingPath,
+                score = e.score,
+            )
         }
 
     // ── dashboard queries (:app only) ───────────────────────────────────────
@@ -178,6 +187,9 @@ class Vault(
         val title = linkResolver.baseTarget(rawTarget)
         if (title.isBlank()) return WriteResult.Rejected("invalid_target", "'" + rawTarget + "' has no target")
 
+        // confirmNew: the user clicked "Create stub" for a specific dangling
+        // target, so the duplicate guard has nothing to add. Letting it refuse
+        // here would make the button silently do nothing.
         return writeNote(
             NoteDraft(
                 folder = folder,
@@ -186,7 +198,8 @@ class Vault(
                 summary = "",
                 bodyMarkdown = "",
                 source = com.secondbrain.model.NoteSource.TEXT,
-            )
+            ),
+            confirmNew = true,
         )
     }
 

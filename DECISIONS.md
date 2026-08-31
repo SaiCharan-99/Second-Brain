@@ -654,3 +654,239 @@ The other three are consequences of how the rest of the module works. One `Atomi
 **Uncertain:** Nothing.
 
 **Files:** `vault/.../VaultIndex.kt`.
+
+---
+
+## D-044 — The official Anthropic SDK is the Claude transport, behind `LlmPort`
+**Date:** 2026-09-01
+
+**Decided:** `ClaudeClient` uses `com.anthropic:anthropic-java` 2.59.0, wrapped behind a new `LlmPort` in `:ports`. The agent loop remains hand-written. Supersedes `ARCHITECTURE.md` §7 Step 3's "`ClaudeClient` — Ktor, `POST /v1/messages`".
+
+**Why:** Udit's call. D-005 is not in conflict — re-read, its reasoning is about not adding a workflow framework ("no LangGraph equivalent, no state-machine DSL"), which says nothing about transport; a hand-written loop over the SDK satisfies it exactly as a hand-written loop over Ktor would.
+
+The deciding argument was API drift. Five breaking changes are documented in the last year alone: `thinking: {type: "adaptive"}` replacing `budget_tokens` (which now returns a **400** on Opus 5), `effort` moving inside `output_config`, assistant prefill being removed, the web-tool type strings changing, and the Files/Skills namespaces leaving beta. With hand-rolled JSON each of those is a runtime 400 discovered mid-conversation; with the SDK they are compile errors. That is not hypothetical — writing this file produced four compile errors from exactly that class of mistake (`JsonValue.fromJsonString` does not exist, `ToolUseBlockParam.input` takes a typed `Input`, not a `JsonValue`), each of which would have been a runtime failure against a hand-rolled client.
+
+Accepted cost: Jackson and OkHttp now sit alongside Ktor and kotlinx-serialization, so the app carries two HTTP stacks and two JSON libraries. The Jackson boundary is confined to one file, `JsonBridge.kt`.
+
+`LlmPort` is what makes this reversible and testable. Nothing above `:agent` sees Jackson, `Optional<T>` or a builder; if the SDK ever proves wrong, only `ClaudeClient` changes. It is also what makes CLAUDE.md's "Fake `LlmPort`" bar reachable — the whole loop is tested with zero API calls and zero dollars.
+
+**Uncertain:** The reference documents SDK 2.34.0 and 2.59.0 is pinned, so a documented builder name may have moved. That surfaces as a compile error, which is the point.
+
+**Files:** `agent/src/main/kotlin/com/secondbrain/agent/ClaudeClient.kt`, `JsonBridge.kt`, `ports/.../LlmPort.kt`, `gradle/libs.versions.toml`.
+
+---
+
+## D-045 — `app.db` has two module owners, coordinating through `schema_migrations`
+**Date:** 2026-09-01
+
+**Decided:** `app.db` tracks migrations per module in a `schema_migrations(module, version, applied_at)` table rather than the `user_version` pragma. `:vault` owns `folder_decisions`; `:agent` owns `conversations`, `messages`, `cost_meter`, and from Step 5 the action ledger. Each opens its own connection and migrates only its own tables. Supersedes D-037's use of `user_version`.
+
+**Why:** The file genuinely has two owners after D-026 moved `folder_decisions` into it, and §1 forbids `:vault` and `:agent` from seeing each other. There is no shared home for a single migration runner: `:model` is data classes plus kotlinx-serialization, and `:ports` is interfaces. `user_version` holds one integer and cannot represent two independent lineages.
+
+Two alternatives were rejected. A ninth `:store` module adds a dependency edge §1 does not have. A port exposing `java.sql.Connection` would let every future port implementation write arbitrary SQL to the *precious* database — a larger hole than the problem being solved.
+
+Accepted cost: roughly forty lines of migration mechanics duplicated between `AppDb` and `AgentDb`. That is cheaper than either alternative, and it keeps `:agent` testable against a bare temp file with no `:vault` present at all.
+
+**Uncertain:** Two connections to one SQLite file rely on WAL and `busy_timeout`, which is fine at this scale and untested under contention.
+
+**Files:** `agent/.../AgentDb.kt`, `vault/.../AppDb.kt`.
+
+---
+
+## D-046 — Four token classes, four prices, and prices live in config
+**Date:** 2026-09-01
+
+**Decided:** `cost_meter` and `messages` carry `tokens_in`, `tokens_out`, `cache_write_tokens` and `cache_read_tokens` as separate columns. The four per-million prices live in `config.toml` under `[agent]`. Supersedes §2's `cost_meter` schema, which has a single `units REAL`.
+
+**Why:** `usage.input_tokens` from the API is the **uncached remainder only**. Total prompt is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`, and the three are priced differently — 1×, 1.25× at the 5-minute TTL, and 0.1× — with output at 5× base input on Opus 5 ($25 against $5). One `units` column cannot express that, and costing a turn from `input_tokens` alone under-reports by whatever the cache served, which in a healthy loop is most of it.
+
+This matters more than a schema tidy-up. The Step 3 exit criterion records a per-capture USD figure and says it "sets the budget for everything after", so an under-reporting cost meter would corrupt Steps 4 through 7 with a number nobody would think to re-check.
+
+Prices are config for the same reason model IDs are (EC-G3): switching models forces you to look at the price, and a stale price is visible rather than buried in a constant. They are flat fields under `[agent]` rather than a nested `pricing` object — `config.toml` uses single-level sections, so a nested field would be unreachable from the file and `ignoreUnknownKeys` would silently fall back to the defaults. That near-miss is now covered by a test.
+
+**Uncertain:** Prices are correct as of 2026-09-01 and will drift. Nothing checks them against the live API.
+
+**Files:** `agent/.../AgentDb.kt`, `CostMeter.kt`, `model/.../Agent.kt`, `config.example.toml`.
+
+---
+
+## D-047 — Caching is on from the start; summaries are a Claude call; the ceiling is checked between turns
+**Date:** 2026-09-01
+
+**Decided:** An explicit cache breakpoint on the system-plus-tools prefix, intermediate breakpoints every 15 content blocks, and startup pre-warming — all on by default. Rolling summaries and phase carry-over are a Claude call on the same model, logged to `cost_meter` as a separate `CLAUDE_SUMMARY` service. The EC-G2 ceiling is evaluated before a new utterance starts, never mid-turn, and continuing past it is confirmed by **speech**.
+
+**Why:** Caching is absent from the artifacts entirely, and it is the dominant cost lever for this workload: the system prompt plus eight tool schemas is a large stable prefix resent on *every* iteration, EC-A1 allows twelve, and cache reads cost 0.1×. Measuring the per-capture figure without it would record a number roughly ten times the prefix cost too high — and that number becomes the project's budget. Voice also meets every criterion for pre-warming (user-visible first-request latency, a large shared prefix, a quiet moment at startup), which serves §9's ~4 s concern directly.
+
+Summaries are model work — §4 asks for "a one-paragraph carry-over summary", which a template cannot write. Same model keeps one cache namespace, though a summary call is a one-shot with its own prefix and will not see hits either way; the separate `cost_meter` service row is so summary spend does not contaminate the per-capture figure.
+
+The ceiling timing is the EC-V7 argument: tripping at iteration seven of a capture would abandon a thought halfway through. A turn in flight always finishes. Confirmation is spoken because R9 permits exactly two typing exceptions — verbatim fields and confirmation clicks for irreversible actions — and continuing to spend money is neither, so a spoken yes keeps the count at two rather than inventing a third.
+
+**Uncertain:** Whether 15 blocks is the right breakpoint spacing, and whether pre-warming's one cache write pays for itself, are both unmeasured until the keys exist.
+
+**Files:** `agent/.../AgentLoop.kt`, `ClaudeClient.kt`, `CostMeter.kt`, `ConversationStore.kt`, `model/.../Agent.kt`.
+
+---
+
+## D-048 — Speaking during THINKING cancels the in-flight turn
+**Date:** 2026-09-01
+
+**Decided:** A new utterance while the agent loop is running cancels the current turn. Cancellation is a cooperative flag checked between iterations and after each tool, not coroutine cancellation. Tokens already spent are still recorded.
+
+**Why:** Udit's call, and it matches the barge-in instinct already established for playback: the user changed their mind, and making them wait through up to twelve round-trips for a reply they no longer want is the worse failure. Anything already written stays written.
+
+Cooperative rather than structured cancellation for the same reason Step 1's playback needed it (D-024): cancellation only lands where something checks for it, and a tool handler doing blocking file I/O is not a suspension point.
+
+Safe in Step 3 specifically — every vault write is atomic and serialised, so a cancel between tools leaves no partial state, and no irreversible action exists yet. Spend is still logged because we paid for it whether or not the answer was wanted.
+
+**Uncertain:** **This needs re-examining at Step 5.** Cancelling with a proposal in flight is a ledger question rather than a UX one, and the R5 state machine has opinions this decision does not cover.
+
+**Files:** `agent/.../AgentLoop.kt`.
+
+---
+
+## D-049 — Five stop reasons, two caps, and thinking is on
+**Date:** 2026-09-01
+
+**Decided:** The loop branches on `END_TURN`, `TOOL_USE`, `MAX_TOKENS`, `REFUSAL` and `API_FAILED`, and treats the SDK's `PAUSE_TURN` and `MODEL_CONTEXT_WINDOW_EXCEEDED` as failed turns with an honest message. Round-trips and tool executions are capped separately. Adaptive thinking is on, with depth controlled by `effort`.
+
+**Why:** §4's flowchart has a `stop_reason?` diamond with two branches, and the API has more. Two of the missing ones fail silently: `refusal` arrives as HTTP 200 with possibly-empty content, so an unguarded loop speaks nothing and looks broken; `max_tokens` can truncate a response mid-`tool_use`, leaving incomplete input JSON that must not be executed. Inspecting the SDK turned up two further stop reasons the artifacts never mention at all — `PAUSE_TURN` and `MODEL_CONTEXT_WINDOW_EXCEEDED`.
+
+EC-A1's "12 tool calls per turn" is ambiguous once parallel tool use is on by default, because one response can carry several calls. Twelve round-trips of N parallel calls each is unbounded, so both are capped: 12 round-trips, 24 executions.
+
+Thinking is on by default on Opus 5, bills as output, and `budget_tokens` returns a 400 there — depth is `effort`, which defaults to `high`. §4 has no notion of thinking at all, and it is both a cost and a latency factor on the critical path.
+
+**Uncertain:** `effort = high` is the API default rather than a measured choice. It should be tuned once per-capture cost is real.
+
+**Files:** `agent/.../AgentLoop.kt`, `ClaudeClient.kt`, `model/.../Agent.kt`.
+
+---
+
+## D-050 — Parallel tool results go back as one message; only two phases are reachable
+**Date:** 2026-09-01
+
+**Decided:** All `tool_result` blocks from one assistant turn are returned in a single user message, including for calls that errored, were refused as gated, or arrived after a cancel. A "turn" is one utterance plus everything the assistant did about it. Phases are built in full, and only `CAPTURE` and `QUERY` are reachable in Step 3.
+
+**Why:** §4's flowchart is strictly sequential — one `tool_use`, one `tool_result`, loop — and parallel tool use is on by default. Splitting results across messages trains the model out of parallel calls, and a *missing* result for any `tool_use` id is a 400 from the API on the next request, not a soft degradation. That makes "every call gets a result, always" a correctness requirement rather than tidiness, which is why the throwing-handler and cancelled-mid-batch paths both still emit one.
+
+"Turn" needed defining because §4's eight-turn window is ambiguous against a twelve-iteration cap: eight turns of *messages* would be roughly 200 content blocks, while eight turns of *utterances* is what a person means. The UI's "TURN 3 / 8" chip counts utterances.
+
+Phases are honest about their coverage: no email, calendar or commerce tool exists yet, so three of the five cannot be entered. The machinery and the gated hook are built so Step 5 is plumbing, but nothing claims they are exercised.
+
+**Uncertain:** Phase *detection* remains unresolved. EC-V8 says Claude classifies intent and never keyword matching, but a phase transition resets the context the model would classify from. Step 3 sidesteps it because only one phase is entered; Step 5 cannot.
+
+**Files:** `agent/.../AgentLoop.kt`, `ConversationStore.kt`, `model/.../Agent.kt`.
+
+---
+
+## D-051 — The loop returns structured results, not just a spoken sentence
+**Date:** 2026-09-01
+
+**Decided:** `AgentLoop.run` returns `AgentTurnResult` carrying the spoken text plus `toolEvents`, phase, turn index, usage, USD, iteration count, latency and — per tool — the note path it touched.
+
+**Why:** The design board's assistant turn offers "Open note" and "Move" chips beneath the reply. Those need the note *path*, which is not in the spoken sentence. A loop returning only a string would force Step 4's UI to regex prose for a filename, which is the kind of coupling that works until a phrasing changes. The same object carries what the status bar needs (`session $0.0416`) and what the DECISIONS entry needs (per-capture USD).
+
+**Uncertain:** Nothing.
+
+**Files:** `model/.../Agent.kt`, `agent/.../AgentLoop.kt`, `ToolRegistry.kt`.
+
+---
+
+## D-052 — True token streaming is deferred, and `stream()` is honest about it
+**Date:** 2026-09-01
+
+**Decided:** `LlmPort.stream()` exists and every caller uses it, but `ClaudeClient` implements it by completing the request and emitting the text as a single delta. Real token streaming is deferred.
+
+**Why:** Streaming buys exactly one thing here: the first sentence of the *final* text reply reaching TTS sooner (EC-T3, and §9 calls it "the main lever" on latency). It cannot help on a tool-calling iteration, because there is no text to speak — and on a CAPTURE turn the final reply is one short sentence while several tool round-trips dominate the wall clock. The payoff is a few hundred milliseconds on the last of several calls.
+
+The cost is not small. The SDK exposes no non-beta message accumulator, so real streaming means hand-assembling text blocks, thinking blocks with their signatures, `tool_use` inputs from partial-JSON deltas, and usage from `message_start` plus `message_delta`. Getting the partial-JSON assembly wrong breaks tool calls *silently*, which is the worst failure mode this system has.
+
+Deferring behind a working port rather than a `TODO` means no caller special-cases it and the upgrade is one method.
+
+**Uncertain:** Whether the saving is worth it at all. Revisit once Step 1's measured latency numbers exist — which needs the Gemini and Kokoro credentials.
+
+**Files:** `agent/.../ClaudeClient.kt`, `ports/.../LlmPort.kt`.
+
+---
+
+## D-053 — Duplicate detection is a deterministic gate in `:vault`, overridable
+**Date:** 2026-09-01
+
+**Decided:** `DuplicateGuard` in `:vault` compares a proposed note's title and summary against existing notes and refuses the write above `vault.duplicate_similarity_threshold` (0.78), naming the match. The model overrides with `confirm_new`. Supersedes EC-N9's prompt-instruction formulation.
+
+**Why:** Udit's call. EC-N9 says "before `vault_write_note`, search for near-duplicates and offer append", which relies on the model choosing to search first — the exact mechanism D-007 argues at length does not survive contact: *"a prompt saying 'reuse existing folders where possible' does not survive two hundred captures."* If that reasoning holds for folders it holds for duplicates.
+
+EC-N9's stated measure also does not exist. It says "cosine/FTS similarity is very high"; there is no cosine anywhere in this system, and FTS5 `rank` is an unbounded negative bm25 score that is not comparable across queries, so "very high" is not expressible with what Step 2 built. This reuses the Folder Guard's normalised-Levenshtein and Jaccard machinery instead: bounded 0..1, deterministic, already tested.
+
+It lives in `:vault` rather than `:agent` because `:agent` cannot see `:vault` and this is a write-path guard exactly like the Folder Guard.
+
+Title and summary are **combined**, weighted 0.65 to the title, rather than taking whichever scores higher. Taking the max was the first implementation and it was wrong: summaries are model-generated and often generically phrased, so a single shared summary made entirely unrelated notes look identical. The test suite caught it immediately — ten integration tests failed, all of them notes with different titles and one shared fixture summary.
+
+`confirm_new` matters as much as the guard. Two genuinely distinct thoughts about one subject must stay writable, so a rejection is a question rather than a wall. `createStub` sets it, because the user clicking "Create stub" for a named dangling target has already decided.
+
+**Uncertain:** 0.78 and the 0.65 title weight are guesses on the same footing as the Folder Guard's 0.72, to be tuned against the 20 real captures.
+
+**Files:** `vault/.../DuplicateGuard.kt`, `VaultWriter.kt`, `Vault.kt`, `ports/.../VaultStore.kt`, `model/.../VaultConfig.kt`.
+
+---
+
+## D-054 — `vault_tree` is indented text with an estimated token cap; `request_typed_input` is not registered
+**Date:** 2026-09-01
+
+**Decided:** `vault_tree` returns indented text rather than nested JSON, truncated at ~2000 tokens estimated at 4 characters per token. `request_typed_input` is not registered in Step 3.
+
+**Why:** EC-A5 caps the `vault_tree` response at "~2000 tokens", which Step 2 did not implement — it built the depth limit and the rollup counts only. A real `count_tokens` call per tool result would double the number of API requests per turn to measure something needed only approximately, so it is estimated and truncated on a line boundary with an explicit marker. Indented text rather than JSON because a tree is what the model reads to choose a folder, and the text encoding costs roughly half the tokens for the same information — which is most of how it fits under the cap at all.
+
+`request_typed_input` is listed as autonomous in §4 but belongs to Step 5: nothing in Step 3 has a verbatim field. An unregistered tool costs nothing; a registered unused one costs bytes in the cached prefix on every request and invites the model to reach for it wrongly.
+
+**Uncertain:** 4 characters per token is a rule of thumb and will be wrong for code-switched text, which tokenises worse than English.
+
+**Files:** `agent/.../VaultTools.kt`.
+
+---
+
+## D-055 — `ask_user` distinguishes "no answer" from "no"
+**Date:** 2026-09-01
+
+**Decided:** `ask_user` returns either `Answered(text)` or `NoAnswer(reason)`. The tool result for `NoAnswer` sets `no_answer: true` with a null answer and tells the model to decide without the user or stop and say so.
+
+**Why:** `ask_user` suspends the entire agent loop on a voice round-trip — TTS, then microphone, then Gemini — and the artifacts do not reach any of the consequences. The one that matters most for correctness: the user may not answer at all. They stay silent, or the EC-V1 gate discards a 200 ms noise, or transcription fails. Collapsing that into an empty string would let the model read silence as a negative, which is how you file a note nobody confirmed.
+
+The others are noted rather than solved here: two clarifying questions burn two of the twelve iterations, because the cap now bounds *conversational* turns; a barge-in cutting the question mid-sentence must not read as failure; and a user thinking for six minutes exceeds the 5-minute cache TTL, which is exactly the 5-to-60-minute band where the 1-hour TTL's doubled write price would pay off.
+
+**Uncertain:** No timeout is implemented — the caller supplying the handler owns that, and what the right wait is has not been measured with a real person.
+
+**Files:** `agent/.../VaultTools.kt`.
+
+---
+
+## D-056 — Step 3's quality gate runs from typed utterances
+**Date:** 2026-09-01
+
+**Decided:** `:app:capture` drives the agent loop over a file of thoughts (or stdin) against the real vault and the real model, reporting folder count, per-capture USD, Folder Guard decisions and placement for manual review.
+
+**Why:** Step 3's exit criteria are voice-first, but the three things being measured are not properties of the voice path: folder count after 20 captures, whether each note landed where a person would have put it, and per-capture cost. All three are properties of the agent loop. Driving them from typed input removes Gemini from the measurement, spends nothing on STT, and makes a run repeatable from a file — which matters because the criterion says to tune the Folder Guard threshold and *re-run*.
+
+R9 is not in play: this is a developer harness, the same category as Step 1's `:voice:run`, not a third user-facing typing exception.
+
+The harness's `ask_user` reports no answer rather than inventing one. A harness that silently fabricated answers would corrupt the placement measurement it exists to produce.
+
+Placement quality is printed for human review rather than asserted. Claiming to have measured "17 of 20 in a folder you'd have chosen yourself" automatically would be a lie.
+
+**Uncertain:** **Step 3's exit criteria are blocked on two credentials.** The loop and the cost figure need an Anthropic key; the voice path additionally needs Gemini (S1.1, still outstanding). Everything is built and unit-tested against a fake `LlmPort`, but the 20-capture gate cannot run yet.
+
+**Files:** `app/src/main/kotlin/com/secondbrain/app/CaptureHarness.kt`, `app/build.gradle.kts`.
+
+---
+
+## D-057 — System prompt v1 explains rejections; it never states a cap
+**Date:** 2026-09-01
+
+**Decided:** The system prompt covers how to speak, one-note-per-thought, placement, wikilink conventions, "ask rather than guess", and — at length — how to read a structured rejection. It contains no numbers: no iteration cap, no folder cap, no similarity threshold. It is a pure constant, byte-identical on every request.
+
+**Why:** R7, read strictly. "A prompt asking a model to keep it short is not a cap." Every limit in this system is enforced by code that returns a structured rejection, so what the prompt usefully supplies is not the limit but the *response* to it — use the folder named in `use_instead` rather than trying a variant spelling; read the note named in a duplicate rejection before deciding to append or confirm.
+
+The constancy is a cache requirement, not style. Any per-request byte in the system prompt — today's date, a note count, the vault tree — invalidates the cached prefix on every single call, which on a twelve-iteration turn means paying full price twelve times for bytes that never change. The date the model genuinely needs goes in the user turn, behind the last breakpoint, where it costs nothing. There is a test asserting the system prompt is identical across every request of a turn.
+
+**Uncertain:** Placement quality is entirely unvalidated. The 20-capture gate exists to measure whether these instructions actually produce ≤ 8 folders and sensible folders, and it has not run.
+
+**Files:** `agent/src/main/kotlin/com/secondbrain/agent/SystemPrompt.kt`.

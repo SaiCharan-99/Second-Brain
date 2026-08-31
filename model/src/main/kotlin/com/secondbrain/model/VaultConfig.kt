@@ -44,6 +44,27 @@ data class VaultConfig(
      */
     @SerialName("link_fuzzy_threshold") val linkFuzzyThreshold: Double = 0.85,
 
+    // ── Duplicate detection (EC-N9, D-053) ───────────────────────────────────
+
+    /**
+     * At or above this, a proposed note is rejected as a probable duplicate and
+     * the model is told which existing note it matched.
+     *
+     * EC-N9 specifies a prompt instruction and a "cosine/FTS similarity" that does
+     * not exist in this system. This is the Folder Guard pattern applied to
+     * duplicates instead: deterministic, bounded 0..1, and overridable by the
+     * model with `confirm_new` so two distinct thoughts on one subject stay
+     * writable.
+     */
+    @SerialName("duplicate_similarity_threshold") val duplicateSimilarityThreshold: Double = 0.78,
+
+    /**
+     * Weight on token-set Jaccard when comparing summaries; the remainder goes to
+     * edit distance. Higher than the Folder Guard's because a spoken restatement
+     * of one thought reuses the words and reorders them.
+     */
+    @SerialName("duplicate_jaccard_weight") val duplicateJaccardWeight: Double = 0.75,
+
     // ── Slugs (EC-N1, EC-N2) ─────────────────────────────────────────────────
 
     /** Maximum slug length, characters, before the `.md` extension. */

@@ -209,3 +209,91 @@ watch_debounce_ms = 300
 # reader all do. Verified. Retry, then fall back to a non-atomic replace.
 atomic_move_attempts   = 5
 atomic_move_backoff_ms = 40
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[agent]
+# Claude. REQUIRED for Step 3 onward.
+#
+# EC-G3: the model id lives here, never in code. A 404 names this key.
+model   = "claude-opus-5"
+api_key = ""                                   # REQUIRED  <-- your Anthropic API key
+
+# Model used for rolling summaries and phase carry-over. Same model by default so
+# there is one cache namespace; a summary call is a one-shot with its own prefix
+# and will not see cache hits either way.
+summary_model = "claude-opus-5"
+
+# Thinking is ON by default on Opus 5 and thinking tokens bill as OUTPUT.
+# `budget_tokens` returns a 400 on this model - depth is controlled by `effort`.
+thinking_enabled = true
+# low | medium | high | xhigh | max
+effort     = "high"
+max_tokens = 8192
+
+# ── EC-A1 the caps ──
+# Section 4 says "12 tool calls per turn", which is ambiguous once one response
+# can carry several tool_use blocks. Round-trips and executions are capped
+# separately: 12 round-trips of N parallel calls each is otherwise unbounded.
+max_iterations       = 12
+max_tool_executions  = 24
+# EC-A3: attempts allowed to correct an unknown tool or a bad schema before the
+# loop stops calling tools and forces a text reply.
+max_self_corrections = 2
+
+# ── EC-A7 ──
+max_attempts       = 3
+initial_backoff_ms = 1000
+request_timeout_ms = 120000
+
+# ── R8 / EC-A6 context ──
+# Turns kept verbatim before older ones collapse into a rolling summary. A turn is
+# one utterance plus everything the assistant did about it, not one message. This
+# is the number in the UI's "TURN 3 / 8" chip.
+context_window_turns = 8
+
+# ── Prompt caching ──
+# The system prompt plus eight tool schemas is a large stable prefix resent on
+# every iteration, and cache reads cost 0.1x. Turning this off roughly multiplies
+# the prefix cost by ten, up to twelve times per capture - the per-capture figure
+# the Step 3 exit criterion records is only meaningful with it on.
+cache_enabled = true
+
+# A cache breakpoint walks back at most 20 content blocks. A twelve-call turn is
+# 24 blocks (12 tool_use + 12 tool_result), which pushes the previous entry out of
+# the lookback and silently rewrites the whole conversation at the write price, on
+# every request, with byte-identical payloads. Intermediate breakpoints every N
+# blocks keep it inside the window.
+cache_block_interval = 15
+
+# Voice meets every criterion for pre-warming: user-visible first-request latency,
+# a large shared prefix, and a quiet moment at startup. Costs one cache write and
+# removes the cold-write penalty from the first capture.
+prewarm_cache = true
+
+# ── EC-G2 cost ceiling ──
+# Checked BEFORE a new utterance starts, never mid-turn: tripping at iteration 7
+# of a capture would abandon a thought, which is what EC-V7 exists to prevent.
+# Continuing past the ceiling is confirmed by SPEECH, not a click - R9 allows
+# exactly two typing exceptions and this is neither of them.
+session_usd_ceiling = 2.00
+session_usd_warn_at = 0.75
+
+# ── Pricing, per million tokens ──
+# In config rather than in code so switching models forces you to look at the
+# price, and a stale price is visible. These live under [agent] rather than their
+# own section because config.toml uses single-level sections.
+#
+# Claude Opus 5 as of 2026-09-01. Verify before trusting: the Step 3 exit
+# criterion records a per-capture USD figure that becomes the budget for Steps 4
+# through 7, so a wrong number here corrupts all of them.
+#
+# NOTE: `usage.input_tokens` from the API is the UNCACHED REMAINDER only. Total
+# prompt = input_tokens + cache_creation + cache_read, each priced differently,
+# which is why there are four numbers here and not two.
+input_usd_per_mtok  = 5.00
+output_usd_per_mtok = 25.00
+# Cache writes are 1.25x base input at the 5-minute TTL (2x at 1 hour).
+cache_write_multiplier = 1.25
+# Cache reads are ~0.1x base input.
+cache_read_multiplier  = 0.1
