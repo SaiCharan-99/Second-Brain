@@ -22,6 +22,7 @@ data class AppConfig(
     val tts: TtsConfig,
     val sessions: SessionsConfig = SessionsConfig(),
     val speech: SpeechConfig = SpeechConfig(),
+    val vault: VaultConfig = VaultConfig(),
 ) {
     /** Safe to log. Secrets replaced, everything else intact. */
     fun redacted(): AppConfig = copy(

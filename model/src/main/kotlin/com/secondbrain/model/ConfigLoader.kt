@@ -198,8 +198,16 @@ object ConfigLoader {
         "inline_limit_bytes", "max_attempts", "initial_backoff_ms",
         "request_timeout_ms", "thinking_cue_after_ms",
         "retention_days", "max_speech_seconds",
+        // vault
+        "max_folder_depth", "max_top_level_folders", "max_slug_length",
+        "tree_default_depth", "tree_folder_listing_cap", "watch_debounce_ms",
+        "atomic_move_attempts", "atomic_move_backoff_ms",
     )
-    private val knownDecimal = setOf("energy_margin_db", "speed")
+    private val knownDecimal = setOf(
+        "energy_margin_db", "speed",
+        // vault
+        "folder_similarity_threshold", "folder_jaccard_weight", "link_fuzzy_threshold",
+    )
     private val knownBoolean = setOf(
         "allow_energy_barge_in_same_device", "delete_wav_on_commit", "fallback_enabled",
     )

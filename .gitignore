@@ -22,6 +22,9 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 .kotlin/
 out/
+# Eclipse / VSCode Kotlin LSP output. Duplicates every source file.
+*/bin/
+bin/
 *.class
 *.jar
 !gradle-wrapper.jar

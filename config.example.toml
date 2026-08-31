@@ -154,3 +154,58 @@ delete_wav_on_commit = false
 # EC-T2: hard cap on spoken output, truncated at a sentence boundary. A prompt
 # saying "keep it short" is not a cap (R7).
 max_speech_seconds = 60
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[vault]
+# R7: every vault threshold lives here. D-007 is explicit that the Folder Guard
+# numbers are guesses to be tuned against 20 real captures in Step 3, which only
+# works if they are config rather than code.
+
+# ── Folder Guard (§5 WF-1, EC-N6) ──
+# score = 0.6 * jaccard(tokens) + 0.4 * (1 - normalisedLevenshtein(slug))
+# At or above this, a proposed folder is rejected as SIMILAR and the model is
+# told to reuse the existing one.
+#
+# Before you tune this: single-word folder names score either ~0.95 (same
+# concept) or below ~0.40 (different concept), so no value between 0.45 and 0.90
+# changes their verdict. There is a test asserting exactly that. The threshold
+# only bites on multi-word names such as "Second Brain" vs "Second Brain UI".
+folder_similarity_threshold = 0.72
+folder_jaccard_weight       = 0.6
+
+# Deepest folder allowed. 1 is a top-level folder.
+max_folder_depth = 3
+# A new top-level folder is refused once this many exist. The Folder Guard panel
+# in the dashboard shows "7 / 12" against this number.
+max_top_level_folders = 12
+
+# ── Links (EC-N7, EC-N8) ──
+# A [[wikilink]] resolves only at or above this similarity; below it the link is
+# left dangling, because a wrong link is worse than no link. An ambiguous tie
+# also stays dangling, with both candidates recorded.
+link_fuzzy_threshold = 0.85
+
+# ── Slugs (EC-N1, EC-N2) ──
+# Maximum filename length before ".md". Titles are transliterated to ASCII, so
+# "బ్లూప్రింట్ లెన్స్" becomes "bluprint-lens"; the frontmatter title keeps the
+# original script.
+max_slug_length = 80
+
+# ── vault_tree (EC-A5) ──
+# Depth returned by default, and the point past which a folder reports a count
+# instead of a listing, so a 2000-note vault cannot blow the context.
+tree_default_depth      = 3
+tree_folder_listing_cap = 20
+
+# ── FileWatcher (EC-N10) ──
+# Coalescing window for filesystem events. One atomic write emits a burst of
+# four events; this collapses them into a single re-index.
+watch_debounce_ms = 300
+
+# ── AtomicWriter (EC-N4) ──
+# ATOMIC_MOVE fails with AccessDeniedException on Windows whenever another handle
+# holds the target open, and Defender, the Search Indexer and the dashboard
+# reader all do. Verified. Retry, then fall back to a non-atomic replace.
+atomic_move_attempts   = 5
+atomic_move_backoff_ms = 40
