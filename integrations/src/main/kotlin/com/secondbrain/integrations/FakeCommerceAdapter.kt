@@ -7,6 +7,7 @@ import com.secondbrain.model.CommerceAvailability
 import com.secondbrain.model.Money
 import com.secondbrain.model.OrderOutcome
 import com.secondbrain.model.Product
+import com.secondbrain.model.SearchOutcome
 import com.secondbrain.ports.CommercePort
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -75,19 +76,24 @@ class FakeCommerceAdapter(
 
     // ── catalogue ───────────────────────────────────────────────────────────
 
-    override suspend fun search(query: String, limit: Int): List<Product> {
+    override suspend fun search(query: String, limit: Int): SearchOutcome {
         val q = query.lowercase().trim()
 
         // EC-Z2: a real zero-result answer, not an empty catalogue by accident.
+        // The fake has no failure modes of its own (no network, no store to
+        // select), so it only ever returns Found or NoMatch - ProviderError
+        // exists for McpCommerceAdapter's real failure modes.
         if (CATALOGUE.none { it.matches(q) }) {
             log.info("Fake search '{}': no results (seeded)", query)
-            return emptyList()
+            return SearchOutcome.NoMatch
         }
 
-        return CATALOGUE
-            .filter { it.matches(q) }
-            .map { it.product(priceFor(it)) }
-            .take(limit)
+        return SearchOutcome.Found(
+            CATALOGUE
+                .filter { it.matches(q) }
+                .map { it.product(priceFor(it)) }
+                .take(limit)
+        )
     }
 
     /** EC-Z6: tomatoes get more expensive the longer you take, so a stale snapshot is visibly stale. */

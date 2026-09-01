@@ -3,6 +3,8 @@ package com.secondbrain.integrations
 import com.secondbrain.model.CartMutation
 import com.secondbrain.model.Money
 import com.secondbrain.model.OrderOutcome
+import com.secondbrain.model.Product
+import com.secondbrain.model.SearchOutcome
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -23,9 +25,17 @@ class FakeCommerceAdapterTest {
 
     private fun adapter(seed: Boolean = false) = FakeCommerceAdapter(seedPreExistingLine = seed)
 
+    /** D-091: FakeCommerceAdapter never produces ProviderError, so these tests only ever unwrap Found/NoMatch. */
+    private suspend fun FakeCommerceAdapter.searchProducts(query: String, limit: Int): List<Product> =
+        when (val outcome = search(query, limit)) {
+            is SearchOutcome.Found -> outcome.products
+            SearchOutcome.NoMatch -> emptyList()
+            is SearchOutcome.ProviderError -> error("FakeCommerceAdapter should never return ProviderError: ${outcome.reason}")
+        }
+
     @Test
     fun `search returns products with a name, size and price for the read-back`() = runTest {
-        val results = adapter().search("bread", 8)
+        val results = adapter().searchProducts("bread", 8)
         assertTrue(results.isNotEmpty())
         val bread = results.first()
         // WF-4's "never silently substitute" rule needs all three present.
@@ -47,14 +57,14 @@ class FakeCommerceAdapterTest {
      */
     @Test
     fun `a term with no match returns nothing rather than something close`() = runTest {
-        assertTrue(adapter().search("quinoa", 8).isEmpty())
-        assertTrue(adapter().search("kimchi", 8).isEmpty())
+        assertTrue(adapter().searchProducts("quinoa", 8).isEmpty())
+        assertTrue(adapter().searchProducts("kimchi", 8).isEmpty())
     }
 
     /** EC-Z3/EC-Z20: several pack sizes of one thing, so ranking has something to do. */
     @Test
     fun `atta comes back in three pack sizes`() = runTest {
-        val sizes = adapter().search("atta", 8).mapNotNull { it.size }.toSet()
+        val sizes = adapter().searchProducts("atta", 8).mapNotNull { it.size }.toSet()
         assertEquals(setOf("1 kg", "5 kg", "10 kg"), sizes)
     }
 
@@ -62,7 +72,7 @@ class FakeCommerceAdapterTest {
     @Test
     fun `an out-of-stock item is found by search but refused on add`() = runTest {
         val a = adapter()
-        assertTrue(a.search("paneer", 8).isNotEmpty(), "it should be findable")
+        assertTrue(a.searchProducts("paneer", 8).isNotEmpty(), "it should be findable")
 
         val result = a.addToCart("paneer-200", 1)
         val rejected = assertInstanceOf(CartMutation.Rejected::class.java, result)
@@ -150,9 +160,9 @@ class FakeCommerceAdapterTest {
     @Test
     fun `the tomato price moves, so a stale local snapshot would be visibly wrong`() = runTest {
         val a = adapter()
-        val first = a.search("tomato", 8).single().price
-        a.search("tomato", 8)
-        val third = a.search("tomato", 8).single().price
+        val first = a.searchProducts("tomato", 8).single().price
+        a.searchProducts("tomato", 8)
+        val third = a.searchProducts("tomato", 8).single().price
 
         assertTrue(third > first, "seeded price change should have fired by the third read")
     }

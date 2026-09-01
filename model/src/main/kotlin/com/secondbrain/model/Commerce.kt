@@ -204,6 +204,28 @@ sealed interface CartMutation {
     data class NeedsReauth(val reason: String) : CartMutation
 }
 
+/**
+ * D-091: what a search actually did, distinguished from what it *looked* like
+ * it did. Before this, [CommercePort.search] returned a bare `List<Product>`,
+ * and an empty list meant three different things with no way to tell them
+ * apart: the provider genuinely has nothing matching (EC-Z2, a normal,
+ * speakable answer), or a store was never selected / a session expired / the
+ * network dropped mid-call (a real failure the code was silently reporting
+ * as "nothing matched"). `CommerceTools` told the user *"nothing matched
+ * 'steel bottles', want to try a different name?"* in both cases — honest for
+ * one, actively misleading for the other, since trying a different name can
+ * never fix a store that was never selected.
+ */
+sealed interface SearchOutcome {
+    data class Found(val products: List<Product>) : SearchOutcome
+
+    /** EC-Z2: a genuine, normal answer. Speak it, offer to skip or rephrase, never substitute. */
+    data object NoMatch : SearchOutcome
+
+    /** Not "nothing matched" - the search never really ran. Tell the user why, not that nothing was found. */
+    data class ProviderError(val reason: String) : SearchOutcome
+}
+
 /** Whether commerce can be used at all right now (EC-Z1, EC-Z22). */
 sealed interface CommerceAvailability {
     data object Ready : CommerceAvailability

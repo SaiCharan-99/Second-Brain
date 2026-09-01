@@ -11,6 +11,7 @@ import com.secondbrain.model.NoteDraft
 import com.secondbrain.model.NoteSource
 import com.secondbrain.model.OrderOutcome
 import com.secondbrain.model.OrderProposal
+import com.secondbrain.model.SearchOutcome
 import com.secondbrain.ports.CommercePort
 import com.secondbrain.ports.VaultStore
 import com.secondbrain.ports.WriteResult
@@ -154,7 +155,28 @@ class CommerceTools(
 
         unavailable()?.let { return it }
 
-        val results = commerce.search(query, config.maxSearchResults)
+        // D-091: SearchOutcome replaces a bare List<Product> specifically so
+        // this branch can exist. A ProviderError used to look identical to
+        // zero matches - the model would tell the user "nothing matched" for
+        // a store-selection or session failure, which not only was
+        // misleading but told them to do the one thing (try a different
+        // name) that could never fix it.
+        val results = when (val outcome = commerce.search(query, config.maxSearchResults)) {
+            is SearchOutcome.ProviderError -> return ToolOutcome(
+                buildJsonObject {
+                    put("error", "search_failed")
+                    put("message", outcome.reason)
+                    put(
+                        "next_step",
+                        "This is not 'nothing matched' - the search itself failed. Tell the user what went wrong " +
+                            "and that trying a different product name will not help. Do not say nothing was found.",
+                    )
+                }.toString(),
+                isError = true,
+            )
+            SearchOutcome.NoMatch -> emptyList()
+            is SearchOutcome.Found -> outcome.products
+        }
 
         // EC-Z2: zero results is a normal, speakable answer. Never substitute
         // something else and never quietly move on.

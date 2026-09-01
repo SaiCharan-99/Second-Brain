@@ -211,4 +211,62 @@ class McpCommerceAdapterTest {
         val payload = json.parseToJsonElement("""{"addresses": [], "count": 0}""")
         assertNull(adapter.firstAddressId(payload))
     }
+
+    // ── D-090: bestMatch, against the real 23-tool name set ─────────────────
+
+    /**
+     * The real tool names Zepto's `tools/list` returned (D-089's discovery
+     * run), name only — [bestMatch] matches on name and description, and the
+     * names alone are what D-090's bug actually turned on. Descriptions
+     * omitted for brevity; every test below that needs one passes it inline.
+     */
+    private fun tool(name: String, description: String? = null) =
+        McpClient.McpTool(name, description, null)
+
+    private val realToolNames = listOf(
+        "zepto_shop", "search_products", "search_multiple_products", "get_product_details",
+        "get_location_serviceability", "select_store", "list_saved_addresses",
+        "select_saved_address", "add_saved_address", "update_drop_zone", "get_user_details",
+        "update_user_name", "view_cart", "update_cart", "get_payment_methods", "create_order",
+        "create_online_payment_order", "create_wallet_order", "create_upi_reserve_pay_order",
+        "check_payment_status", "get_order_detail", "list_order_history", "get_past_order_items",
+    ).map { tool(it) }
+
+    @Test
+    @DisplayName("D-090: list_saved_addresses binds to ADDRESS_LIST, not left unbound by 'add' inside 'address'")
+    fun `address list binds correctly`() {
+        assertEquals("list_saved_addresses", adapter.bestMatch(McpCommerceAdapter.Role.ADDRESS_LIST, realToolNames))
+    }
+
+    @Test
+    @DisplayName("D-090: select_saved_address binds to ADDRESS_SELECT, not left unbound by 'add' inside 'address'")
+    fun `address select binds correctly`() {
+        assertEquals("select_saved_address", adapter.bestMatch(McpCommerceAdapter.Role.ADDRESS_SELECT, realToolNames))
+    }
+
+    @Test
+    fun `add_saved_address itself never wins either address role`() {
+        assertTrue("add_saved_address" != adapter.bestMatch(McpCommerceAdapter.Role.ADDRESS_LIST, realToolNames))
+        assertTrue("add_saved_address" != adapter.bestMatch(McpCommerceAdapter.Role.ADDRESS_SELECT, realToolNames))
+    }
+
+    @Test
+    @DisplayName("every other D-089 binding still holds against the real name set")
+    fun `the rest of the real bindings are unchanged`() {
+        assertEquals("search_products", adapter.bestMatch(McpCommerceAdapter.Role.SEARCH, realToolNames))
+        assertEquals("view_cart", adapter.bestMatch(McpCommerceAdapter.Role.CART_VIEW, realToolNames))
+        assertEquals("update_cart", adapter.bestMatch(McpCommerceAdapter.Role.CART_WRITE, realToolNames))
+        assertEquals("create_order", adapter.bestMatch(McpCommerceAdapter.Role.ORDER_PLACE, realToolNames))
+    }
+
+    @Test
+    @DisplayName("every role in Role.entries binds to something against the real 23 tools")
+    fun `no role is silently unbound against the real tool set`() {
+        McpCommerceAdapter.Role.entries.forEach { role ->
+            assertTrue(
+                adapter.bestMatch(role, realToolNames) != null,
+                "$role bound to nothing - this is exactly D-090's failure mode",
+            )
+        }
+    }
 }

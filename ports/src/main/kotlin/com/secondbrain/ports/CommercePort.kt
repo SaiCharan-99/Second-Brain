@@ -5,6 +5,7 @@ import com.secondbrain.model.CartMutation
 import com.secondbrain.model.CommerceAvailability
 import com.secondbrain.model.OrderOutcome
 import com.secondbrain.model.Product
+import com.secondbrain.model.SearchOutcome
 
 /**
  * WF-4's commerce dependency, as a port.
@@ -58,8 +59,14 @@ interface CommercePort {
      */
     suspend fun availability(): CommerceAvailability
 
-    /** EC-Z2/EC-Z3: zero results is a normal answer, not an error. Never substitute. */
-    suspend fun search(query: String, limit: Int): List<Product>
+    /**
+     * D-091: [SearchOutcome] distinguishes a genuine zero-result search
+     * (EC-Z2/EC-Z3, a normal answer) from a search that never really ran — a
+     * store never selected, a session that expired, a transport failure.
+     * `List<Product>` could not tell those apart, and this port's one previous
+     * implementation was found doing exactly that (D-090).
+     */
+    suspend fun search(query: String, limit: Int): SearchOutcome
 
     /** EC-Z5: rejection (out of stock) is an outcome, not an exception. */
     suspend fun addToCart(productId: String, quantity: Int): CartMutation

@@ -14,6 +14,7 @@ import com.secondbrain.model.OrderOutcome
 import com.secondbrain.model.OrderProposal
 import com.secondbrain.model.Product
 import com.secondbrain.model.SearchHit
+import com.secondbrain.model.SearchOutcome
 import com.secondbrain.model.TreeNode
 import com.secondbrain.ports.CommercePort
 import com.secondbrain.ports.LlmBlock
@@ -65,6 +66,8 @@ class CommerceToolsTest {
         private val availability: CommerceAvailability = CommerceAvailability.Ready,
         private val orderOutcome: OrderOutcome = OrderOutcome.Placed("ORD-1"),
         private val searchResults: List<Product> = emptyList(),
+        /** Overrides [searchResults] entirely when set - the D-091 ProviderError path has no equivalent list to wrap. */
+        private val searchOutcome: SearchOutcome? = null,
         override val isFake: Boolean = false,
     ) : CommercePort {
         var placedWith: String? = null
@@ -72,7 +75,7 @@ class CommerceToolsTest {
 
         override val displayName = "TestMart"
         override suspend fun availability() = availability
-        override suspend fun search(query: String, limit: Int) = searchResults
+        override suspend fun search(query: String, limit: Int) = searchOutcome ?: SearchOutcome.Found(searchResults)
         override suspend fun addToCart(productId: String, quantity: Int) = CartMutation.Applied(cart)
         override suspend fun updateQuantity(lineId: String, quantity: Int): CartMutation {
             cart = cart.copy(lines = cart.lines.mapNotNull {
@@ -184,6 +187,23 @@ class CommerceToolsTest {
 
         assertTrue(result.contains("\"count\":0"))
         assertTrue(result.contains("Do not substitute"))
+    }
+
+    @Test
+    @DisplayName("D-091: a provider failure is never reported as 'nothing matched'")
+    fun `a search provider error is distinguished from zero results`(@TempDir dir: Path) = runTest {
+        val commerce = FakeCommerce(searchOutcome = SearchOutcome.ProviderError("Couldn't set a delivery location: session expired"))
+        val (dispatcher, _, _) = setup(dir, commerce)
+
+        val result = call(dispatcher, "commerce_search", """{"query":"steel bottle"}""")
+
+        assertTrue(result.contains("search_failed"))
+        assertTrue(result.contains("session expired"))
+        // The exact bug D-090/D-091 exist to prevent: a real failure must
+        // never come back looking like "nothing matched", because the
+        // model's own next move for that (try a different name) cannot fix it.
+        assertFalse(result.contains("\"count\":0"))
+        assertTrue(result.contains("Do not say nothing was found"))
     }
 
     @Test

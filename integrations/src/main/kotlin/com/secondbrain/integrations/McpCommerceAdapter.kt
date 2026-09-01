@@ -7,6 +7,7 @@ import com.secondbrain.model.CommerceAvailability
 import com.secondbrain.model.Money
 import com.secondbrain.model.OrderOutcome
 import com.secondbrain.model.Product
+import com.secondbrain.model.SearchOutcome
 import com.secondbrain.ports.CommercePort
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -248,8 +249,25 @@ class McpCommerceAdapter(
      * `add_to_cart` both contain "cart", and a naive `contains` would bind
      * whichever came back first. Required terms must all be present; optional
      * ones only break ties.
+     *
+     * D-090: `required`/`preferred`/`excluded` are all matched by plain
+     * substring, deliberately, over the tempting-looking alternative of
+     * splitting each name into whole words and matching those instead.
+     * Substring is what lets `"detail"` correctly exclude `get_product_details`
+     * (a real ORDER_PLACE near-miss) despite the plural — whole-word matching
+     * would need `"detail"` written as `"details"` to catch that, and would
+     * simultaneously need `"address"` written as `"addresses"` *and*
+     * `"address"` to catch both `list_saved_addresses` and
+     * `select_saved_address`. Plurals make one blanket rule wrong in both
+     * directions at once, so this is intentional per-pattern substring
+     * matching, not an oversight — but it demands care from whoever adds a
+     * pattern: an excluded term that is itself a substring of a *required*
+     * term (`"add"` inside `"add`ress`"`) silently unbinds the role instead of
+     * refining it, which is exactly what D-090 found and fixed. Internal
+     * rather than private so [McpCommerceAdapterTest] can assert bindings
+     * directly against fixture tool lists, not just the pure JSON readers.
      */
-    private fun bestMatch(role: Role, tools: List<McpClient.McpTool>): String? {
+    internal fun bestMatch(role: Role, tools: List<McpClient.McpTool>): String? {
         val spec = ROLE_PATTERNS.getValue(role)
         return tools
             .mapNotNull { tool ->
@@ -277,12 +295,21 @@ class McpCommerceAdapter(
 
     // ── search ──────────────────────────────────────────────────────────────
 
-    override suspend fun search(query: String, limit: Int): List<Product> {
-        val tool = toolFor(Role.SEARCH) ?: run {
-            log.warn("No search tool bound; returning no results for '{}'.", query)
-            return emptyList()
+    /**
+     * D-091: every early-return here used to be `emptyList()` — an unbound
+     * tool, a failed store selection, a transport error, and a genuine zero
+     * matches were one indistinguishable outcome, and `CommerceTools` told
+     * the user *"nothing matched"* for all four. Only the last one is that.
+     */
+    override suspend fun search(query: String, limit: Int): SearchOutcome {
+        val tool = toolFor(Role.SEARCH)
+            ?: return SearchOutcome.ProviderError("Zepto's search tool could not be found.")
+
+        ensureStoreSelected().let {
+            if (it is McpClient.McpResult.Err) {
+                return SearchOutcome.ProviderError("Couldn't set a delivery location: ${it.error.readable()}")
+            }
         }
-        ensureStoreSelected().let { if (it is McpClient.McpResult.Err) { log.warn("Store selection failed: {}", it.error); return emptyList() } }
 
         // D-089: exactly what search_products' own schema declares. The old
         // code sent q/search/limit alongside query on the theory that extra
@@ -293,16 +320,38 @@ class McpCommerceAdapter(
         return when (val result = client.callTool(tool, args)) {
             is McpClient.McpResult.Err -> {
                 log.warn("Search failed: {}", result.error)
-                emptyList()
+                SearchOutcome.ProviderError(result.error.readable())
             }
             is McpClient.McpResult.Ok -> {
                 if (McpClient.isToolError(result.value)) {
-                    log.warn("Search tool reported an error: {}", McpClient.flattenContent(result.value))
-                    return emptyList()
+                    val message = McpClient.flattenContent(result.value)
+                    log.warn("Search tool reported an error: {}", message)
+                    // Zepto's own tool-level errors are things like "Store
+                    // not selected" - a real failure, not "nothing matched
+                    // this query". Session loss surfaces the same way here.
+                    if (message.contains("session", ignoreCase = true) || message.contains("store", ignoreCase = true)) {
+                        // D-091: a store selection lives on the MCP session,
+                        // not on this object. Resetting the client's session
+                        // without also forgetting selectedAddressId would
+                        // leave the NEXT call skipping ensureStoreSelected's
+                        // early-return check against a store the fresh
+                        // session never actually selected.
+                        client.resetSession()
+                        selectedAddressId = null
+                    }
+                    return SearchOutcome.ProviderError(message.take(300))
                 }
-                parseProducts(payloadOf(result.value)).take(limit)
+                val products = parseProducts(payloadOf(result.value)).take(limit)
+                if (products.isEmpty()) SearchOutcome.NoMatch else SearchOutcome.Found(products)
             }
         }
+    }
+
+    private fun McpClient.McpError.readable(): String = when (this) {
+        is McpClient.McpError.Unauthorized -> "not signed in: $message"
+        is McpClient.McpError.SessionLost -> message
+        is McpClient.McpError.Rpc -> message
+        is McpClient.McpError.Transport -> message
     }
 
     // ── cart mutations ──────────────────────────────────────────────────────
@@ -667,15 +716,26 @@ class McpCommerceAdapter(
             // D-089: new. Store selection has no equivalent in D-079's design
             // because the need for it was unknown until a real search failed
             // with "Store not selected" - see ensureStoreSelected's doc.
+            //
+            // D-090: "add" is excluded as "add_" (trailing underscore), never
+            // bare "add" - bare "add" is a substring of "address"/"addresses"
+            // themselves ("**add**ress"), so it excluded list_saved_addresses
+            // and select_saved_address from their OWN roles, leaving both
+            // unbound and silently breaking every search/cart/order call
+            // behind them. "add_" only matches an actual add_-prefixed tool
+            // name (add_saved_address) - see bestMatch's own doc for why this
+            // is a targeted fix rather than a switch to word-exact matching
+            // (that breaks the equally-deliberate "detail" matching "details"
+            // elsewhere in this table).
             Role.ADDRESS_LIST to RolePattern(
                 required = listOf(listOf("address")),
                 preferred = listOf("list", "saved"),
-                excluded = listOf("select", "add", "update", "drop_zone", "dropzone"),
+                excluded = listOf("select", "add_", "update", "drop_zone", "dropzone"),
             ),
             Role.ADDRESS_SELECT to RolePattern(
                 required = listOf(listOf("address"), listOf("select", "set", "choose")),
                 preferred = listOf("select", "saved"),
-                excluded = listOf("list", "add", "drop_zone", "dropzone"),
+                excluded = listOf("list", "add_", "drop_zone", "dropzone"),
             ),
         )
     }
