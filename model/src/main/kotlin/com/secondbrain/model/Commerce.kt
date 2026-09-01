@@ -106,6 +106,14 @@ data class Product(
     val available: Boolean = true,
     /** Some catalogues report this; used only to warn, never to block. */
     @SerialName("in_stock_hint") val inStockHint: String? = null,
+    /**
+     * Stage 4 (D-098): a thumbnail for the comparison table D-094 authorized.
+     * Confirmed present on Zepto's real `search_products` response (top-level
+     * `imageUrl`, `McpCommerceAdapterTest`'s captured fixture) — not every
+     * catalogue entry has one, and nothing here treats it as load-bearing:
+     * `readBack()` never mentions it, only the visual comparison card does.
+     */
+    @SerialName("image_url") val imageUrl: String? = null,
 ) {
     /** WF-4: "read aloud with name, size and price before it goes in." */
     fun readBack(): String = buildString {
@@ -238,6 +246,42 @@ sealed interface CommerceAvailability {
 
     /** Configured but the user has never signed in, or the refresh token died. */
     data class NeedsLogin(val reason: String) : CommerceAvailability
+}
+
+/**
+ * Stage 4 (D-098): one row of the user's persistent "Saved Cart" — the list
+ * they build up over multiple photographed/dictated grocery lists across
+ * days, distinct from the live Zepto cart [Cart] snapshots above.
+ *
+ * A price/size **snapshot at the moment it was saved**, not a live join
+ * against the catalogue — matching [Cart]'s own "the cart is server state, not
+ * ours" rule would mean re-searching on every render of the Saved Cart screen,
+ * which is unnecessary network chatter for a screen whose entire job is "what
+ * did I already decide to buy". The snapshot is why Stage 5's checkout bridge
+ * re-verifies via a real [CommercePort] call before anything is added to the
+ * live cart — this row is a *decision record*, never treated as current stock
+ * or price truth.
+ *
+ * Not `@Serializable` — unlike [Product]/[Cart] above, nothing round-trips this
+ * through kotlinx.serialization ([SavedCartStore] persists it via plain JDBC,
+ * [CommerceTools] builds its JSON by hand with `buildJsonObject`), and
+ * `java.time.Instant` has no built-in serializer, which would otherwise force
+ * a `@Contextual` annotation with no actual caller.
+ */
+data class SavedItem(
+    val id: Long = 0,
+    /** [Product.id] at save time — Stage 5 re-adds by this id first, falling back to a fresh search by name if it's gone. */
+    val productId: String,
+    val name: String,
+    val size: String? = null,
+    val unitPrice: Money,
+    val quantity: Int,
+    val imageUrl: String? = null,
+    /** What the user originally asked for ("steel water bottle") — shown alongside the picked product so a re-search has something to go on. */
+    val sourceQuery: String,
+    val savedAt: java.time.Instant,
+) {
+    val lineTotal: Money get() = unitPrice * quantity
 }
 
 /** Mirrors `InsertOutcome`/`SendOutcome` so the gate's executor mapping is identical everywhere. */

@@ -586,6 +586,10 @@ class McpCommerceAdapter(
                 size = firstString(obj, "packSize", "size", "unit"),
                 price = price,
                 available = availableQty == null || availableQty > 0,
+                // Stage 4 (D-098): confirmed top-level on the real response;
+                // absent on some entries (McpCommerceAdapterTest's second
+                // fixture product has none), so this stays nullable end to end.
+                imageUrl = firstString(obj, "imageUrl", "image", "thumbnailUrl"),
             )
         }
     }

@@ -23,6 +23,9 @@ import com.secondbrain.ports.VaultStore
 import com.secondbrain.ports.WriteResult
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -69,14 +72,20 @@ class CommerceToolsTest {
         private val searchResults: List<Product> = emptyList(),
         /** Overrides [searchResults] entirely when set - the D-091 ProviderError path has no equivalent list to wrap. */
         private val searchOutcome: SearchOutcome? = null,
+        /** Stage 4 (D-098): per-query outcomes, for `commerce_prepare_list`'s tests - a single [searchOutcome] cannot express "this item found things, that one didn't". Falls back to [searchOutcome]/[searchResults] for any query not listed here. */
+        private val searchOutcomesByQuery: Map<String, SearchOutcome> = emptyMap(),
         override val isFake: Boolean = false,
     ) : CommercePort {
         var placedWith: String? = null
         var readCartCalls = 0
+        val searchedQueries = mutableListOf<String>()
 
         override val displayName = "TestMart"
         override suspend fun availability() = availability
-        override suspend fun search(query: String, limit: Int) = searchOutcome ?: SearchOutcome.Found(searchResults)
+        override suspend fun search(query: String, limit: Int): SearchOutcome {
+            searchedQueries += query
+            return searchOutcomesByQuery[query] ?: searchOutcome ?: SearchOutcome.Found(searchResults)
+        }
         override suspend fun addToCart(productId: String, quantity: Int) = CartMutation.Applied(cart)
         override suspend fun updateQuantity(lineId: String, quantity: Int): CartMutation {
             cart = cart.copy(lines = cart.lines.mapNotNull {
@@ -244,6 +253,97 @@ class CommerceToolsTest {
         assertTrue(result.contains("read_back"))
         assertTrue(result.contains("400 g"))
         assertTrue(result.contains("45 rupees"))
+    }
+
+    // ── Stage 4 (D-098): commerce_prepare_list, the comparison-table entry point ──
+
+    @Test
+    @DisplayName("Stage 4: one commerce_prepare_list call searches every item and returns candidates per item")
+    fun `prepare list returns candidates grouped by query`(@TempDir dir: Path) = runTest {
+        val commerce = FakeCommerce(
+            searchOutcomesByQuery = mapOf(
+                "bread" to SearchOutcome.Found(listOf(Product("p1", "Brown Bread", "400 g", Money.ofRupees(45)))),
+                "milk" to SearchOutcome.Found(listOf(Product("p2", "Toned Milk", "500 ml", Money.ofRupees(28)))),
+            ),
+        )
+        val (dispatcher, _, _) = setup(dir, commerce)
+
+        val result = call(dispatcher, "commerce_prepare_list", """{"items":[{"query":"bread"},{"query":"milk"}]}""")
+
+        assertTrue(result.contains("\"query\":\"bread\""))
+        assertTrue(result.contains("Brown Bread"))
+        assertTrue(result.contains("\"query\":\"milk\""))
+        assertTrue(result.contains("Toned Milk"))
+        assertEquals(setOf("bread", "milk"), commerce.searchedQueries.toSet())
+    }
+
+    @Test
+    @DisplayName("D-091's ProviderError distinction carries into commerce_prepare_list too, per item")
+    fun `prepare list flags a provider error without hiding the other items' results`(@TempDir dir: Path) = runTest {
+        val commerce = FakeCommerce(
+            searchOutcomesByQuery = mapOf(
+                "bread" to SearchOutcome.Found(listOf(Product("p1", "Brown Bread", "400 g", Money.ofRupees(45)))),
+                "steel bottle" to SearchOutcome.ProviderError("session expired"),
+            ),
+        )
+        val (dispatcher, _, _) = setup(dir, commerce)
+
+        val result = call(dispatcher, "commerce_prepare_list", """{"items":[{"query":"bread"},{"query":"steel bottle"}]}""")
+
+        assertTrue(result.contains("Brown Bread"))
+        assertTrue(result.contains("session expired"))
+        assertTrue(result.contains("At least one search failed outright"))
+    }
+
+    @Test
+    @DisplayName("a zero-match item comes back with an empty candidate list, not an error")
+    fun `prepare list reports a genuine zero match as empty candidates`(@TempDir dir: Path) = runTest {
+        val commerce = FakeCommerce(searchOutcomesByQuery = mapOf("saffron" to SearchOutcome.NoMatch))
+        val (dispatcher, _, _) = setup(dir, commerce)
+
+        val result = call(dispatcher, "commerce_prepare_list", """{"items":[{"query":"saffron"}]}""")
+
+        assertTrue(result.contains("\"query\":\"saffron\""))
+        assertTrue(result.contains("\"candidates\":[]"))
+        assertFalse(result.contains("\"error\""))
+    }
+
+    @Test
+    fun `prepare list with no items is rejected`(@TempDir dir: Path) = runTest {
+        val (dispatcher, _, _) = setup(dir, FakeCommerce())
+        assertTrue(call(dispatcher, "commerce_prepare_list", """{"items":[]}""").contains("empty_list"))
+    }
+
+    @Test
+    @DisplayName("R7: concurrency is bounded by config, not unlimited")
+    fun `prepare list never runs more searches at once than the configured concurrency`(@TempDir dir: Path) = runTest {
+        var inFlight = 0
+        var maxInFlight = 0
+        val lock = Mutex()
+        val commerce = object : CommercePort {
+            override val isFake = true
+            override val displayName = "TestMart"
+            override suspend fun availability() = CommerceAvailability.Ready
+            override suspend fun search(query: String, limit: Int): SearchOutcome {
+                lock.withLock { inFlight++; if (inFlight > maxInFlight) maxInFlight = inFlight }
+                delay(20)
+                lock.withLock { inFlight-- }
+                return SearchOutcome.Found(listOf(Product("p", query, null, Money.ofRupees(10))))
+            }
+            override suspend fun addToCart(productId: String, quantity: Int) = CartMutation.Applied(Cart())
+            override suspend fun updateQuantity(lineId: String, quantity: Int) = CartMutation.Applied(Cart())
+            override suspend fun removeFromCart(lineId: String) = CartMutation.Applied(Cart())
+            override suspend fun readCart() = Cart()
+            override suspend fun placeOrder(cart: Cart, idempotencyKey: String) = OrderOutcome.Placed("x")
+        }
+        val gate = newGate(dir)
+        val tools = CommerceTools(commerce, gate, CommerceConfig(enabled = true, maxComparisonConcurrency = 2), RecordingVault())
+        val dispatcher = ToolDispatcher(tools.register(ToolRegistry.builder()).build())
+
+        val items = (1..8).joinToString(",") { """{"query":"item$it"}""" }
+        call(dispatcher, "commerce_prepare_list", """{"items":[$items]}""")
+
+        assertTrue(maxInFlight <= 2, "expected at most 2 concurrent searches, saw $maxInFlight")
     }
 
     // ── the cart-edit flow ──────────────────────────────────────────────────

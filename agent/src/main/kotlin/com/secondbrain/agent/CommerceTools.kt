@@ -12,9 +12,15 @@ import com.secondbrain.model.NoteSource
 import com.secondbrain.model.OrderOutcome
 import com.secondbrain.model.OrderProposal
 import com.secondbrain.model.SearchOutcome
+import com.secondbrain.model.Product
 import com.secondbrain.ports.CommercePort
 import com.secondbrain.ports.VaultStore
 import com.secondbrain.ports.WriteResult
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -72,6 +78,7 @@ class CommerceTools(
     fun register(builder: ToolRegistry.Builder): ToolRegistry.Builder = builder
         .autonomous("commerce_save_list", SAVE_LIST_DESC, SAVE_LIST_SCHEMA) { saveList(it) }
         .autonomous("commerce_search", SEARCH_DESC, SEARCH_SCHEMA) { search(it) }
+        .autonomous("commerce_prepare_list", PREPARE_LIST_DESC, PREPARE_LIST_SCHEMA) { prepareList(it) }
         .autonomous("commerce_cart_view", CART_VIEW_DESC, EMPTY_SCHEMA) { cartView() }
         .autonomous("commerce_cart_add", CART_ADD_DESC, CART_ADD_SCHEMA) { cartAdd(it) }
         .autonomous("commerce_cart_update", CART_UPDATE_DESC, CART_UPDATE_SCHEMA) { cartUpdate(it) }
@@ -200,26 +207,93 @@ class CommerceTools(
         return ToolOutcome(
             buildJsonObject {
                 put("count", results.size)
-                put("results", buildJsonArray {
-                    results.forEach { p ->
-                        add(buildJsonObject {
-                            put("product_id", p.id)
-                            put("name", p.name)
-                            p.size?.let { put("size", it) }
-                            put("price", p.price.format())
-                            put("price_spoken", p.price.spoken())
-                            put("available", p.available)
-                            // WF-4: "never silently substitute." The exact
-                            // sentence to say is handed over pre-built so the
-                            // size and price cannot be dropped from it.
-                            put("read_back", p.readBack())
-                        })
-                    }
-                })
+                put("results", buildJsonArray { results.forEach { add(productJson(it)) } })
                 put(
                     "next_step",
                     "Read the best match aloud using its read_back text - name, size and price - before adding " +
                         "anything. If several pack sizes match, say which one you picked.",
+                )
+            }.toString()
+        )
+    }
+
+    /** Shared by [search] and [prepareList] so a product never gets two different JSON shapes across tools. */
+    private fun productJson(p: Product) = buildJsonObject {
+        put("product_id", p.id)
+        put("name", p.name)
+        p.size?.let { put("size", it) }
+        put("price", p.price.format())
+        put("price_spoken", p.price.spoken())
+        put("available", p.available)
+        p.imageUrl?.let { put("image_url", it) }
+        // WF-4: "never silently substitute." The exact sentence to say is
+        // handed over pre-built so the size and price cannot be dropped from it.
+        put("read_back", p.readBack())
+    }
+
+    // ── Stage 4 (D-098): the comparison-table entry point ─────────────────────
+
+    /**
+     * One `commerce_search` per requested item, run with bounded concurrency
+     * (`config.maxComparisonConcurrency` — R7, not a hardcoded number) rather
+     * than sequentially. The model gets every item's candidates back in one
+     * tool result instead of one search per turn; [VoiceController][the app]
+     * reads this same result off the turn's tool events to open the
+     * comparison window D-094 authorized — nothing here renders UI, this tool
+     * only produces the structured data the UI is built from.
+     *
+     * Deliberately a *new* tool rather than teaching `commerce_search` to take
+     * an array: `commerce_search`'s contract ("one item, read the best match
+     * aloud") stays exactly as it is for the existing single-item voice flow;
+     * this is the bulk, look-and-click path Stage 4 added alongside it.
+     */
+    private suspend fun prepareList(input: String): ToolOutcome {
+        val obj = json.parseToJsonElement(input).jsonObject
+        val queries = obj["items"]?.jsonArray
+            ?.mapNotNull { it.jsonObject["query"]?.jsonPrimitive?.content?.trim()?.takeIf(String::isNotBlank) }
+            .orEmpty()
+        if (queries.isEmpty()) return error("empty_list", "No items to compare.")
+
+        unavailable()?.let { return it }
+
+        val semaphore = Semaphore(config.maxComparisonConcurrency)
+        val results: List<Pair<String, SearchOutcome>> = coroutineScope {
+            queries.map { query ->
+                async { semaphore.withPermit { query to commerce.search(query, config.maxSearchResults) } }
+            }.awaitAll()
+        }
+
+        var anyFailed = false
+        val requests = buildJsonArray {
+            results.forEach { (query, outcome) ->
+                add(buildJsonObject {
+                    put("query", query)
+                    when (outcome) {
+                        is SearchOutcome.Found -> put("candidates", buildJsonArray {
+                            outcome.products.forEach { add(productJson(it)) }
+                        })
+                        SearchOutcome.NoMatch -> put("candidates", buildJsonArray { })
+                        is SearchOutcome.ProviderError -> {
+                            anyFailed = true
+                            put("error", outcome.reason)
+                            put("candidates", buildJsonArray { })
+                        }
+                    }
+                })
+            }
+        }
+
+        return ToolOutcome(
+            buildJsonObject {
+                put("requests", requests)
+                put(
+                    "next_step",
+                    "A comparison view has opened on screen with candidates for each item - this is a look-and-" +
+                        "click step (D-094), not a spoken one. Tell the user briefly what you searched for and " +
+                        "that they can pick from what's on screen; do NOT read every candidate aloud. Any item " +
+                        "with zero candidates or an error has nothing to click, so mention those by name." +
+                        if (anyFailed) " At least one search failed outright - say which, and that trying a " +
+                            "different name will not fix it." else "",
                 )
             }.toString()
         )
@@ -507,6 +581,20 @@ class CommerceTools(
             {"type":"object","properties":{
               "query":{"type":"string","description":"One product, in plain words: 'brown bread', 'toor dal'. Search one item at a time."}
             },"required":["query"]}
+        """
+
+        const val PREPARE_LIST_DESC =
+            "Search for SEVERAL grocery items at once and open a visual comparison view for the user to pick " +
+                "from by clicking, instead of reading candidates aloud one at a time. Use this instead of " +
+                "commerce_search when there are multiple items to shop for - a photographed or dictated list is " +
+                "the normal case. Selections made on screen do not come back to you; check " +
+                "commerce_cart_view or ask the user what they picked."
+        const val PREPARE_LIST_SCHEMA = """
+            {"type":"object","properties":{
+              "items":{"type":"array","description":"One entry per grocery item to search for.","items":{"type":"object","properties":{
+                "query":{"type":"string","description":"One product, in plain words: 'brown bread', 'steel water bottle'."}
+              },"required":["query"]}}
+            },"required":["items"]}
         """
 
         const val CART_VIEW_DESC =

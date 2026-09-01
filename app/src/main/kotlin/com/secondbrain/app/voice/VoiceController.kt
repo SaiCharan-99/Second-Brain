@@ -33,6 +33,7 @@ import com.secondbrain.voice.VoiceGate
 import com.secondbrain.voice.WavCodec
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -44,7 +45,16 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.slf4j.LoggerFactory
+import com.secondbrain.agent.SavedCartStore
+import com.secondbrain.model.Money
+import com.secondbrain.model.Product
+import com.secondbrain.model.SavedItem
 import java.nio.file.Files
 import java.time.Instant
 import java.time.ZoneId
@@ -98,6 +108,8 @@ class VoiceController(
      */
     private val commerceSignIn: (suspend () -> Result<Unit>)? = null,
     private val isCommerceSignedIn: () -> Boolean = { false },
+    /** Stage 4 (D-098): where a comparison-card "Add" click is persisted. Null iff commerce is off entirely. */
+    private val savedCart: SavedCartStore? = null,
 ) {
     private val log = LoggerFactory.getLogger(VoiceController::class.java)
 
@@ -147,7 +159,12 @@ class VoiceController(
         val pendingImageLabel: String? = null,
         /** Stage 2/D-096: whether [CameraWindow] should be showing. */
         val cameraWindowOpen: Boolean = false,
+        /** Stage 4/D-098: non-null while [ShoppingComparisonWindow] should be showing — the last `commerce_prepare_list` result. */
+        val shoppingComparison: List<ComparisonRequest>? = null,
     )
+
+    /** One `commerce_prepare_list` request's candidates, parsed from the tool result for [ShoppingComparisonWindow]. */
+    data class ComparisonRequest(val query: String, val candidates: List<Product>, val error: String? = null)
 
     private val _state = MutableStateFlow(
         UiState(
@@ -321,16 +338,29 @@ class VoiceController(
      * rather than queuing two — there is one turn to attach to, so there is
      * one slot.
      */
+    /**
+     * Stage 3 (D-097): the JPEG decode/resize/base64 work in
+     * [ImageIntake.encodeForVision] is real CPU + file I/O — calling it inline
+     * from a button's `onClick` (as [CameraWindow]'s "Use photo" originally
+     * did via [attachCapturedFrame]) ran it straight on the Compose UI thread
+     * and would visibly stutter the window for a large photo. Dispatching
+     * through [scope] onto [Dispatchers.IO] is what the plan's "run image
+     * preparation concurrently, don't block" actually asked for; a spoken
+     * turn started while this is still in flight is unaffected either way —
+     * [pendingImage] is only read once, at the moment a turn is sent.
+     */
     fun attachImage(path: java.nio.file.Path) {
-        val block = try {
-            ImageIntake.encodeForVision(path)
-        } catch (e: Exception) {
-            log.warn("Could not read image {}: {}", path, e.message)
-            _state.update { it.copy(statusLine = "Couldn't read that image: ${e.message}") }
-            return
+        scope.launch {
+            val block = try {
+                withContext(Dispatchers.IO) { ImageIntake.encodeForVision(path) }
+            } catch (e: Exception) {
+                log.warn("Could not read image {}: {}", path, e.message)
+                _state.update { it.copy(statusLine = "Couldn't read that image: ${e.message}") }
+                return@launch
+            }
+            pendingImage = PendingImage(path.fileName.toString(), block)
+            _state.update { it.copy(pendingImageLabel = path.fileName.toString(), statusLine = "") }
         }
-        pendingImage = PendingImage(path.fileName.toString(), block)
-        _state.update { it.copy(pendingImageLabel = path.fileName.toString(), statusLine = "") }
     }
 
     // ── Stage 2/D-096: the camera window ────────────────────────────────────
@@ -350,26 +380,90 @@ class VoiceController(
      * image — [CameraWindow] never touches [pendingImage] directly.
      */
     fun attachCapturedFrame(frame: java.awt.image.BufferedImage) {
-        val tempFile = java.nio.file.Files.createTempFile("camera-capture-", ".jpg")
-        try {
-            javax.imageio.ImageIO.write(frame, "jpg", tempFile.toFile())
-            attachImage(tempFile)
-        } catch (e: Exception) {
-            log.warn("Could not save the captured frame: {}", e.message)
-            _state.update { it.copy(statusLine = "Couldn't use that photo: ${e.message}") }
-        } finally {
-            // The bytes are already re-encoded into pendingImage's base64
-            // block by attachImage() -> ImageIntake.encodeForVision by this
-            // point; the temp file was only ever a bridge to reuse that
-            // existing pipeline unchanged, not something worth keeping.
-            runCatching { java.nio.file.Files.deleteIfExists(tempFile) }
-        }
         closeCameraWindow()
+        scope.launch {
+            val tempFile = withContext(Dispatchers.IO) { java.nio.file.Files.createTempFile("camera-capture-", ".jpg") }
+            try {
+                withContext(Dispatchers.IO) { javax.imageio.ImageIO.write(frame, "jpg", tempFile.toFile()) }
+                // attachImage() dispatches its own encode work onto Dispatchers.IO
+                // and updates pendingImage/state asynchronously; awaiting its Job
+                // here (rather than fire-and-forget) is what lets this function's
+                // own `finally` know it is safe to delete tempFile.
+                val block = try {
+                    withContext(Dispatchers.IO) { ImageIntake.encodeForVision(tempFile) }
+                } catch (e: Exception) {
+                    log.warn("Could not read captured frame {}: {}", tempFile, e.message)
+                    _state.update { it.copy(statusLine = "Couldn't use that photo: ${e.message}") }
+                    return@launch
+                }
+                pendingImage = PendingImage("camera capture", block)
+                _state.update { it.copy(pendingImageLabel = "camera capture", statusLine = "") }
+            } catch (e: Exception) {
+                log.warn("Could not save the captured frame: {}", e.message)
+                _state.update { it.copy(statusLine = "Couldn't use that photo: ${e.message}") }
+            } finally {
+                // The bytes are already re-encoded into pendingImage's base64
+                // block by this point; the temp file was only ever a bridge to
+                // reuse ImageIntake's existing pipeline, not worth keeping.
+                withContext(Dispatchers.IO) { runCatching { java.nio.file.Files.deleteIfExists(tempFile) } }
+            }
+        }
     }
 
     fun clearPendingImage() {
         pendingImage = null
         _state.update { it.copy(pendingImageLabel = null) }
+    }
+
+    // ── Stage 4/D-098: the comparison window ────────────────────────────────
+
+    private fun parseComparison(resultJson: String): List<ComparisonRequest> {
+        val obj = Json.parseToJsonElement(resultJson).jsonObject
+        val requests = obj["requests"] as? JsonArray ?: return emptyList()
+        return requests.mapNotNull { element ->
+            val r = element.jsonObject
+            val query = r["query"]?.jsonPrimitive?.content ?: return@mapNotNull null
+            val candidates = (r["candidates"] as? JsonArray).orEmpty().mapNotNull { c ->
+                val p = c.jsonObject
+                val id = p["product_id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                val name = p["name"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                Product(
+                    id = id,
+                    name = name,
+                    size = p["size"]?.jsonPrimitive?.content,
+                    price = Money.parse(p["price"]?.jsonPrimitive?.content) ?: Money.ZERO,
+                    available = p["available"]?.jsonPrimitive?.content?.toBoolean() ?: true,
+                    imageUrl = p["image_url"]?.jsonPrimitive?.content,
+                )
+            }
+            ComparisonRequest(query, candidates, r["error"]?.jsonPrimitive?.content)
+        }
+    }
+
+    fun dismissComparison() {
+        _state.update { it.copy(shoppingComparison = null) }
+    }
+
+    /** A comparison card's "Add" click: persisted straight to the Saved Cart, never to the live Zepto cart directly (Stage 5's checkout bridge is the only path onto that). */
+    fun addToSavedCart(product: Product, sourceQuery: String, quantity: Int) {
+        val store = savedCart ?: return
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                store.add(
+                    SavedItem(
+                        productId = product.id,
+                        name = product.name,
+                        size = product.size,
+                        unitPrice = product.price,
+                        quantity = quantity.coerceAtLeast(1),
+                        imageUrl = product.imageUrl,
+                        sourceQuery = sourceQuery,
+                        savedAt = Instant.now(),
+                    )
+                )
+            }
+            _state.update { it.copy(statusLine = "Added ${product.name} to your saved list.") }
+        }
     }
 
     /**
@@ -624,6 +718,18 @@ class VoiceController(
             // D-048: the user is already talking again; onTalkDown() has moved
             // the mic state on. Touching it here would stomp that.
             return
+        }
+
+        // Stage 4 (D-098): the same pattern touchedNotes already uses - scan
+        // this turn's tool events rather than adding a new AgentTurnResult
+        // field, since `resultJson` already carries everything the window
+        // needs and nothing outside :app needs to know this tool exists.
+        result.toolEvents.lastOrNull { it.name == "commerce_prepare_list" && !it.isError }?.let { event ->
+            val parsed = runCatching { parseComparison(event.resultJson) }.getOrElse {
+                log.warn("Could not parse commerce_prepare_list result: {}", it.message)
+                null
+            }
+            if (!parsed.isNullOrEmpty()) _state.update { it.copy(shoppingComparison = parsed) }
         }
 
         appendLine(

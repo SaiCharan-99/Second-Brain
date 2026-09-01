@@ -308,6 +308,9 @@ data class CommerceConfig(
     /** EC-Z3: how many candidates a search returns for the model to rank. */
     @SerialName("max_search_results") val maxSearchResults: Int = 8,
 
+    /** Stage 4 (D-098): how many `commerce_prepare_list` searches run at once, never unbounded. */
+    @SerialName("max_comparison_concurrency") val maxComparisonConcurrency: Int = 4,
+
     /**
      * EC-Z13: an extracted list item at or below this confidence is read back
      * for confirmation before it is ever searched for.

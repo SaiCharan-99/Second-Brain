@@ -421,6 +421,10 @@ order_ceiling_inr = 2000
 # EC-Z3: how many candidates a product search returns for the model to rank.
 max_search_results = 8
 
+# Stage 4 (D-098): how many commerce_prepare_list searches run at once when
+# comparing several grocery items - never unbounded (R7).
+max_comparison_concurrency = 4
+
 # EC-Z13: an item extracted from a photographed list at or below this
 # confidence is read back for confirmation before it is searched for.
 low_confidence_threshold = 0.75

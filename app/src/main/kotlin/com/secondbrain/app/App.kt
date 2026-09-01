@@ -18,17 +18,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.secondbrain.agent.ConfirmationGate
+import com.secondbrain.app.shopping.SavedCartController
+import com.secondbrain.app.shopping.SavedCartScreen
 import com.secondbrain.app.vault.VaultBrowserController
 import com.secondbrain.app.vault.VaultScreen
 import com.secondbrain.app.voice.CameraWindow
 import com.secondbrain.app.voice.ProposalWindow
+import com.secondbrain.app.voice.ShoppingComparisonWindow
 import com.secondbrain.app.voice.TypedInputOverlay
 import com.secondbrain.app.voice.VoiceController
 import com.secondbrain.app.voice.VoiceScreen
 import com.secondbrain.ports.CalendarPort
 
-/** ARCHITECTURE.md §7 Step 4: "window + navigation rail with two destinations." */
-enum class Screen { VOICE, VAULT }
+/** ARCHITECTURE.md §7 Step 4: "window + navigation rail with two destinations." Stage 4 (D-098) added a third. */
+enum class Screen { VOICE, VAULT, SHOPPING }
 
 /**
  * The composition root's UI. All real state lives in [VoiceController] and
@@ -47,6 +50,8 @@ fun App(
     confirmationGate: ConfirmationGate,
     /** Optional: powers `ProposalWindow`'s live conflict recompute (EC-C4). Null when Google isn't configured. */
     calendarPort: CalendarPort? = null,
+    /** Stage 4/5 (D-098/D-099). Null iff commerce is off entirely — the Shopping nav entry is hidden in that state. */
+    savedCartController: SavedCartController? = null,
 ) {
     var screen by remember { mutableStateOf(Screen.VOICE) }
     var pendingNotePath by remember { mutableStateOf<String?>(null) }
@@ -57,6 +62,9 @@ fun App(
                 NavigationRail(containerColor = AppColors.Canvas) {
                     NavRailEntry(label = "Voice", selected = screen == Screen.VOICE) { screen = Screen.VOICE }
                     NavRailEntry(label = "Vault", selected = screen == Screen.VAULT) { screen = Screen.VAULT }
+                    if (savedCartController != null) {
+                        NavRailEntry(label = "Shopping", selected = screen == Screen.SHOPPING) { screen = Screen.SHOPPING }
+                    }
                 }
                 Box(Modifier.weight(1f).fillMaxSize()) {
                     when (screen) {
@@ -65,6 +73,7 @@ fun App(
                             screen = Screen.VAULT
                         }
                         Screen.VAULT -> VaultScreen(vaultController, notePathToOpen = pendingNotePath)
+                        Screen.SHOPPING -> savedCartController?.let { SavedCartScreen(it) }
                     }
                 }
             }
@@ -78,6 +87,9 @@ fun App(
             // Stage 2/D-096: same overlay pattern - renders nothing unless
             // VoiceController.UiState.cameraWindowOpen is true.
             CameraWindow(voiceController)
+            // Stage 4/D-098: same overlay pattern - renders nothing unless
+            // VoiceController.UiState.shoppingComparison is non-null.
+            ShoppingComparisonWindow(voiceController)
         }
     }
 }

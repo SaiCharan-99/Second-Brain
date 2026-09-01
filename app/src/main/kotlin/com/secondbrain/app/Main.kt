@@ -25,11 +25,13 @@ import com.secondbrain.agent.ConfirmationGate
 import com.secondbrain.agent.ConversationStore
 import com.secondbrain.agent.CostMeter
 import com.secondbrain.agent.EmailTools
+import com.secondbrain.agent.SavedCartStore
 import com.secondbrain.agent.SystemPrompt
 import com.secondbrain.agent.ToolDispatcher
 import com.secondbrain.agent.ToolRegistry
 import com.secondbrain.agent.TurnClock
 import com.secondbrain.agent.VaultTools
+import com.secondbrain.app.shopping.SavedCartController
 import com.secondbrain.app.vault.VaultBrowserController
 import com.secondbrain.app.voice.VoiceController
 import com.secondbrain.integrations.CalendarAdapter
@@ -109,7 +111,10 @@ fun main() {
             title = "Second Brain",
             state = windowState,
         ) {
-            App(session.voiceController, session.vaultController, session.confirmationGate, session.calendarPort)
+            App(
+                session.voiceController, session.vaultController, session.confirmationGate, session.calendarPort,
+                savedCartController = session.savedCartController,
+            )
         }
     }
 }
@@ -121,6 +126,8 @@ private class AppSession(
     val confirmationGate: ConfirmationGate,
     /** Null when [com.secondbrain.model.GoogleConfig] is unset (decision 16). */
     val calendarPort: CalendarPort?,
+    /** Stage 4/5 (D-098/D-099). Null iff `commerce.enabled` is false — the Shopping nav entry hides in that state. */
+    val savedCartController: SavedCartController?,
     private val vault: Vault,
     private val agentDb: AgentDb,
     private val sttHttp: HttpClient,
@@ -208,6 +215,10 @@ private fun buildSession(): AppSession {
     vault.startWatching(scope) // Step 4: FileWatcher -> UI state flow (Vault.changes)
 
     val agentDb = AgentDb(root.resolve("app.db"))
+    // Stage 4 (D-098): constructed unconditionally, like ActionLedger - cheap,
+    // and a list saved while commerce happened to be off should not vanish
+    // the moment it's turned back on.
+    val savedCartStore = SavedCartStore(agentDb)
     val llm = ClaudeClient(appConfig.agent)
     val prompts = SystemPrompt()
     val costMeter = CostMeter(agentDb, appConfig.agent)
@@ -232,6 +243,11 @@ private fun buildSession(): AppSession {
     var zeptoTokenStore: TokenStore? = null
     var mcpClient: McpClient? = null
     var mcpOAuth: McpOAuth? = null
+    // Stage 4/5 (D-098/D-099): the Saved Cart. Constructed only alongside
+    // commercePort, below - a Saved Cart with nowhere to check out to is not
+    // useful, and matches every other commerce handle's "off unless
+    // commerce.enabled" default (D-080).
+    var savedCartController: SavedCartController? = null
 
     // ── Google: optional (decision 16) ──────────────────────────────────────
     val googleConfigured = appConfig.google.clientId.isNotBlank() && appConfig.google.clientSecret.isNotBlank()
@@ -310,6 +326,7 @@ private fun buildSession(): AppSession {
         commercePort = port
         val commerceTools = CommerceTools(port, confirmationGate, appConfig.commerce, vault, turnClock)
         builder = commerceTools.register(builder)
+        savedCartController = SavedCartController(scope, savedCartStore, port)
     } else {
         log.info("commerce.enabled = false - the grocery tools are not registered.")
     }
@@ -361,6 +378,7 @@ private fun buildSession(): AppSession {
         // commerce.enabled=false means mcpOAuth is never constructed at all.
         commerceSignIn = mcpOAuth?.let { oauth -> { oauth.signIn() } },
         isCommerceSignedIn = mcpOAuth?.let { oauth -> { oauth.isSignedIn() } } ?: { false },
+        savedCart = savedCartStore,
     )
 
     val vaultController = VaultBrowserController(scope, vault)
@@ -373,7 +391,7 @@ private fun buildSession(): AppSession {
     )
 
     return AppSession(
-        voiceController, vaultController, confirmationGate, calendarPort, vault, agentDb,
+        voiceController, vaultController, confirmationGate, calendarPort, savedCartController, vault, agentDb,
         sttHttp, ttsHttp, tokenStore, zeptoTokenStore, mcpClient, mcpOAuth, scope,
     )
 }

@@ -53,7 +53,7 @@ class AgentDb(
         const val MODULE: String = "agent"
 
         /** Bump when adding a migration. Never renumber an existing one. */
-        const val SCHEMA_VERSION: Int = 2
+        const val SCHEMA_VERSION: Int = 3
     }
 
     init {
@@ -107,6 +107,7 @@ class AgentDb(
         try {
             if (current < 1) migrateTo1()
             if (current < 2) migrateTo2()
+            if (current < 3) migrateTo3()
             recordVersion(SCHEMA_VERSION)
             connection.commit()
         } catch (e: Exception) {
@@ -204,6 +205,33 @@ class AgentDb(
                 """.trimIndent()
             )
             s.execute("CREATE INDEX IF NOT EXISTS idx_action_ledger_state ON action_ledger(state)")
+        }
+    }
+
+    /**
+     * Migration 3 — Stage 4 (D-098): `saved_cart_lines`, the persistent
+     * "Saved Cart" the comparison-table UI writes to. `app.db` per R10, since
+     * this is exactly the kind of state that must survive a restart —
+     * `index.db` would silently lose it.
+     */
+    private fun migrateTo3() {
+        connection.createStatement().use { s ->
+            s.execute(
+                """
+                CREATE TABLE IF NOT EXISTS saved_cart_lines (
+                  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                  product_id    TEXT NOT NULL,
+                  name          TEXT NOT NULL,
+                  size          TEXT,
+                  unit_price_paise INTEGER NOT NULL,
+                  quantity      INTEGER NOT NULL,
+                  image_url     TEXT,
+                  source_query  TEXT NOT NULL,
+                  saved_at      TEXT NOT NULL
+                )
+                """.trimIndent()
+            )
+            s.execute("CREATE INDEX IF NOT EXISTS idx_saved_cart_lines_saved_at ON saved_cart_lines(saved_at)")
         }
     }
 
