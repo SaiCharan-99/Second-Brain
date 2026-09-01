@@ -34,6 +34,12 @@ import java.time.ZoneId
  */
 class CalendarToolsTest {
 
+    private val databases = TestDatabases()
+
+    @org.junit.jupiter.api.AfterEach
+    fun closeTrackedDatabases() = databases.closeAll()
+
+
     private class FakeVaultStore(private val people: Map<String, String> = emptyMap()) : VaultStore {
         override suspend fun tree(depth: Int?) = TreeNode("", "", 0, 0, 0, 0)
         override suspend fun read(path: String): Note? {
@@ -71,7 +77,7 @@ class CalendarToolsTest {
 
     private fun turnClock(): TurnClock = TurnClock().apply { set(tuesdayNoon, kolkata) }
 
-    private fun gate(dir: Path) = ConfirmationGate(ActionLedger(AgentDb(dir.resolve("app.db"))))
+    private fun gate(dir: Path) = ConfirmationGate(ActionLedger(databases.open(dir)))
 
     private fun dispatcherFor(
         dir: Path,

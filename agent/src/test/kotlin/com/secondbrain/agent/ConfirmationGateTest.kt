@@ -35,7 +35,13 @@ import java.time.Instant
  */
 class ConfirmationGateTest {
 
-    private fun gate(dir: Path): ConfirmationGate = ConfirmationGate(ActionLedger(AgentDb(dir.resolve("app.db"))))
+    private val databases = TestDatabases()
+
+    @org.junit.jupiter.api.AfterEach
+    fun closeTrackedDatabases() = databases.closeAll()
+
+
+    private fun gate(dir: Path): ConfirmationGate = ConfirmationGate(ActionLedger(databases.open(dir)))
 
     private val emailFields = listOf(
         ProposalField("subject", "Subject", "hello", FieldKind.CONTENT),
@@ -272,7 +278,7 @@ class ConfirmationGateTest {
 
         @Test
         fun `Failed maps to FAILED and resolves the gate`(@TempDir dir: Path) = runTest {
-            val ledger = ActionLedger(AgentDb(dir.resolve("app.db")))
+            val ledger = ActionLedger(databases.open(dir))
             val g = ConfirmationGate(ledger)
             val result = async(start = CoroutineStart.UNDISPATCHED) {
                 g.submit(LedgerKind.EMAIL_SEND, emailProposal(), emailFields) { _, _ -> ConfirmationGate.ExecutorResult.Failed("bad address") }
@@ -287,7 +293,7 @@ class ConfirmationGateTest {
         @Test
         @DisplayName("EC-E4/Z8: Unknown maps to UNKNOWN and resolves the gate - never retried")
         fun `Unknown maps to UNKNOWN`(@TempDir dir: Path) = runTest {
-            val ledger = ActionLedger(AgentDb(dir.resolve("app.db")))
+            val ledger = ActionLedger(databases.open(dir))
             val g = ConfirmationGate(ledger)
             val result = async(start = CoroutineStart.UNDISPATCHED) {
                 g.submit(LedgerKind.EMAIL_SEND, emailProposal(), emailFields) { _, _ -> ConfirmationGate.ExecutorResult.Unknown("timed out") }
@@ -301,7 +307,7 @@ class ConfirmationGateTest {
         @Test
         @DisplayName("EC-E3: NeedsReauth stays APPROVED, and the gate stays open for a retry")
         fun `NeedsReauth keeps the gate open`(@TempDir dir: Path) = runTest {
-            val ledger = ActionLedger(AgentDb(dir.resolve("app.db")))
+            val ledger = ActionLedger(databases.open(dir))
             val g = ConfirmationGate(ledger)
             var attempts = 0
             val result = async(start = CoroutineStart.UNDISPATCHED) {
@@ -326,7 +332,7 @@ class ConfirmationGateTest {
 
         @Test
         fun `a throwing executor is treated as Unknown, never crashes the gate`(@TempDir dir: Path) = runTest {
-            val ledger = ActionLedger(AgentDb(dir.resolve("app.db")))
+            val ledger = ActionLedger(databases.open(dir))
             val g = ConfirmationGate(ledger)
             val result = async(start = CoroutineStart.UNDISPATCHED) {
                 g.submit(LedgerKind.EMAIL_SEND, emailProposal(), emailFields) { _, _ -> throw IllegalStateException("boom") }

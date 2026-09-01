@@ -25,13 +25,15 @@ data class AppConfig(
     val vault: VaultConfig = VaultConfig(),
     val agent: AgentConfig = AgentConfig(),
     val google: GoogleConfig = GoogleConfig(),
+    val commerce: CommerceConfig = CommerceConfig(),
 ) {
     /** Safe to log. Secrets replaced, everything else intact. */
     fun redacted(): AppConfig = copy(
-        stt = stt.copy(apiKey = MASK),
-        tts = tts.copy(apiKey = tts.apiKey?.let { MASK }),
+        stt = stt.copy(apiKey = MASK, fallbackApiKey = stt.fallbackApiKey?.let { MASK }),
+        tts = tts.copy(apiKey = tts.apiKey?.let { MASK }, fallbackApiKey = tts.fallbackApiKey?.let { MASK }),
         agent = agent.redacted(),
         google = google.redacted(),
+        commerce = commerce.redacted(),
     )
 
     companion object {
@@ -130,6 +132,15 @@ data class SttConfig(
     /** EC-G3: model IDs live in config. A 404 must name this key. */
     val model: String,
     @SerialName("api_key") val apiKey: String,
+    /**
+     * A second Gemini key, tried only once every attempt against [apiKey] has
+     * failed (any reason — bad credentials, quota, transport). Exists because
+     * a free-tier key's daily request quota is small enough that a normal
+     * testing session exhausts it (D-086), and two independent free-tier
+     * projects roughly double the effective daily budget for nothing. Null
+     * means "no fallback" and the existing single-key behaviour is unchanged.
+     */
+    @SerialName("fallback_api_key") val fallbackApiKey: String? = null,
     @SerialName("base_url") val baseUrl: String = "https://generativelanguage.googleapis.com",
     /**
      * Above this, switch from inline base64 to the Files API. The real cutover
@@ -159,6 +170,8 @@ data class TtsConfig(
     val voice: String = "Kore",
     @SerialName("base_url") val baseUrl: String = "https://generativelanguage.googleapis.com",
     @SerialName("api_key") val apiKey: String? = null,
+    /** Same fallback mechanism as [SttConfig.fallbackApiKey] — see its doc. Ignored by KokoroTts. */
+    @SerialName("fallback_api_key") val fallbackApiKey: String? = null,
     /** KokoroTts only: the container it should return. Ignored by GeminiTts, which always gets raw PCM. */
     @SerialName("response_format") val responseFormat: String = "wav",
     /** KokoroTts only: Gemini TTS has no speed parameter, only prompt phrasing. */
@@ -228,4 +241,84 @@ data class GoogleConfig(
         clientId = if (clientId.isBlank()) clientId else AppConfig.MASK,
         clientSecret = if (clientSecret.isBlank()) clientSecret else AppConfig.MASK,
     )
+}
+
+/**
+ * Step 7 — Zepto MCP and the grocery workflow (WF-4).
+ *
+ * Two defaults here are deliberately the timid ones, and both are R2/R3
+ * reasoning rather than caution for its own sake:
+ *
+ * [enabled] is false. Zepto's own documentation says it plainly — *"any order
+ * placed through the Zepto MCP will be processed as a real Zepto order"*. There
+ * is no sandbox to develop against, so commerce is off until someone turns it
+ * on knowing that.
+ *
+ * [useFake] is true. Even once enabled, the default adapter is the deterministic
+ * fake, so the whole flow is demoable and testable with zero money at risk.
+ * §7 Step 7 requires the fake be **visibly labelled in the UI** whenever it is
+ * active, which `OrderProposal.isFake` carries and `ProposalWindow` renders.
+ */
+@Serializable
+data class CommerceConfig(
+    /** Off until explicitly enabled. Real orders, real money, no sandbox. */
+    val enabled: Boolean = false,
+
+    /** True = `FakeCommerceAdapter` (safe, offline, labelled). False = the real Zepto MCP. */
+    @SerialName("use_fake") val useFake: Boolean = true,
+
+    @SerialName("mcp_url") val mcpUrl: String = "https://mcp.zepto.co.in/mcp",
+
+    /**
+     * Filled in by Dynamic Client Registration on first run and written back
+     * here, so the app registers once rather than on every launch. Blank
+     * triggers registration.
+     */
+    @SerialName("oauth_client_id") val oauthClientId: String = "",
+
+    /**
+     * Loopback port for the OAuth redirect.
+     *
+     * Measured during spike S7.1 and worth stating because it is the opposite
+     * of what `GoogleConfig` does: the redirect host **must be `localhost`, not
+     * `127.0.0.1`**. Zepto's authorization server sits behind an AWS load
+     * balancer whose WAF returns a bare HTML 403 for a registration payload
+     * containing the literal IP — `http://localhost:8765/callback` registers
+     * fine, `http://127.0.0.1:8765/callback` does not (D-079). Fixed rather
+     * than 0-and-pick-one because the port is baked into the registered
+     * redirect URI.
+     */
+    @SerialName("redirect_port") val redirectPort: Int = 8765,
+
+    /** Own file, same reasoning as `GoogleConfig.tokenStorePath`. */
+    @SerialName("token_store_path") val tokenStorePath: String = "zepto_tokens.db",
+
+    /**
+     * EC-Z17, and the single most valuable control in this step. Above this
+     * total the order window demands a second, explicit acknowledgement.
+     *
+     * It is not a hard block: a genuinely large order is legitimate and the
+     * user can say so. What it stops is the *silent* large order — "twenty
+     * kilos of rice" misheard from "two kilos" builds a perfectly valid cart
+     * that nothing else in the pipeline has any reason to question. R7: this
+     * lives here and is enforced in code, never asked for in a prompt.
+     */
+    @SerialName("order_ceiling_inr") val orderCeilingInr: Long = 2_000,
+
+    /** EC-Z3: how many candidates a search returns for the model to rank. */
+    @SerialName("max_search_results") val maxSearchResults: Int = 8,
+
+    /**
+     * EC-Z13: an extracted list item at or below this confidence is read back
+     * for confirmation before it is ever searched for.
+     */
+    @SerialName("low_confidence_threshold") val lowConfidenceThreshold: Double = 0.75,
+
+    @SerialName("request_timeout_ms") val requestTimeoutMs: Long = 30_000,
+    @SerialName("max_attempts") val maxAttempts: Int = 3,
+) {
+    fun redacted(): CommerceConfig =
+        copy(oauthClientId = if (oauthClientId.isBlank()) oauthClientId else AppConfig.MASK)
+
+    val orderCeiling: Money get() = Money.ofRupees(orderCeilingInr)
 }

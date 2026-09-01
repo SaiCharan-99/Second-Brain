@@ -499,4 +499,82 @@ class AgentLoopTest {
             assertTrue(llm.requests.first().cacheMessageBreakpoints.isEmpty())
         }
     }
+
+    @Nested
+    @DisplayName("Step 8 / WF-6: photos attached to a turn")
+    inner class Photos {
+
+        private val photo = com.secondbrain.ports.LlmBlock.Image("ZmFrZS1iYXNlNjQ=", "image/jpeg")
+
+        @Test
+        @DisplayName("an attached image is placed before the text block, in the newest user message")
+        fun `image precedes text in the user turn`() = runTest {
+            val recorder = Recorder()
+            val llm = FakeLlm().enqueue(FakeLlm.text("Saved."))
+
+            AgentLoop(llm, registry(recorder), ToolDispatcher(registry(recorder)), prompts, config).run(
+                utterance = "here's my list",
+                phase = Phase.COMMERCE,
+                history = emptyList(),
+                conversationId = "c1",
+                turnIndex = 0,
+                images = listOf(photo),
+            )
+
+            // .messages.last() would be wrong here: FakeLlm stores the request's
+            // `messages` list by reference, and AgentLoop mutates that same
+            // list afterwards to append the assistant reply - so by the time
+            // this test looks, "last()" is the reply, not the turn that was
+            // actually sent. The user message is reliably first().
+            val sentMessage = llm.requests.single().messages.first()
+            assertEquals(com.secondbrain.ports.LlmBlock.Image::class, sentMessage.blocks.first()::class)
+            assertEquals(com.secondbrain.ports.LlmBlock.Text::class, sentMessage.blocks.last()::class)
+            assertEquals(photo, sentMessage.blocks.first())
+        }
+
+        @Test
+        @DisplayName("no images is the default, and looks identical to every pre-Step-8 call site")
+        fun `omitting images sends a text-only user message`() = runTest {
+            val recorder = Recorder()
+            val llm = FakeLlm().enqueue(FakeLlm.text("Saved."))
+
+            AgentLoop(llm, registry(recorder), ToolDispatcher(registry(recorder)), prompts, config).run(
+                utterance = "a plain thought",
+                phase = Phase.CAPTURE,
+                history = emptyList(),
+                conversationId = "c1",
+                turnIndex = 0,
+            )
+
+            val sentMessage = llm.requests.single().messages.last()
+            assertEquals(1, sentMessage.blocks.size)
+            assertEquals(com.secondbrain.ports.LlmBlock.Text::class, sentMessage.blocks.single()::class)
+        }
+
+        @Test
+        @DisplayName("an image survives a tool-calling round-trip, replayed unchanged on the next request")
+        fun `image is replayed in later requests within the same turn`() = runTest {
+            val recorder = Recorder()
+            val reg = registry(recorder)
+            val llm = FakeLlm().enqueue(
+                FakeLlm.toolCall("vault_tree", "{}"),
+                FakeLlm.text("Done."),
+            )
+
+            AgentLoop(llm, reg, ToolDispatcher(reg), prompts, config).run(
+                utterance = "photo of my notes",
+                phase = Phase.CAPTURE,
+                history = emptyList(),
+                conversationId = "c1",
+                turnIndex = 0,
+                images = listOf(photo),
+            )
+
+            // Second request's history includes the original user message,
+            // image and all - nothing strips it out mid-turn.
+            assertEquals(2, llm.requests.size)
+            val userMessageInSecondRequest = llm.requests[1].messages.first { it.role == com.secondbrain.ports.LlmMessage.Role.USER }
+            assertTrue(userMessageInSecondRequest.blocks.any { it == photo })
+        }
+    }
 }

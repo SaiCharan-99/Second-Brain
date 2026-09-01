@@ -55,7 +55,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.secondbrain.app.AppColors
 import com.secondbrain.app.MonoTextStyle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The Voice screen: WF-1 end to end, seen. Large hold-to-talk control, a state
@@ -102,7 +104,7 @@ fun VoiceScreen(controller: VoiceController, onOpenNote: (String) -> Unit) {
                 }
             },
     ) {
-        StatusBar(state)
+        StatusBar(state, controller)
         HorizontalDivider(color = AppColors.Border)
 
         TranscriptLog(
@@ -117,7 +119,7 @@ fun VoiceScreen(controller: VoiceController, onOpenNote: (String) -> Unit) {
 }
 
 @Composable
-private fun StatusBar(state: VoiceController.UiState) {
+private fun StatusBar(state: VoiceController.UiState, controller: VoiceController) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -136,9 +138,28 @@ private fun StatusBar(state: VoiceController.UiState) {
             state.statusLine.ifBlank { state.micDeviceLabel },
             style = MaterialTheme.typography.bodySmall,
             color = AppColors.Muted,
+            modifier = Modifier.weight(1f),
         )
-        Text(state.sessionCostLabel, style = MonoTextStyle, color = AppColors.Muted)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Step 8 / D-082 gap 1: only rendered when commerce is live
+            // against the real Zepto MCP (commerceLive) — FakeCommerceAdapter
+            // and commerce.enabled=false both mean this chip never appears.
+            if (state.commerceLive && !state.commerceSignedIn) {
+                CommerceSignInChip(controller)
+            }
+            Text(state.sessionCostLabel, style = MonoTextStyle, color = AppColors.Muted)
+        }
     }
+}
+
+@Composable
+private fun CommerceSignInChip(controller: VoiceController) {
+    AssistChip(
+        onClick = { controller.signInToCommerce() },
+        label = { Text("Sign in to Zepto") },
+        colors = AssistChipDefaults.assistChipColors(labelColor = AppColors.Amber),
+        border = BorderStroke(1.dp, AppColors.Amber.copy(alpha = 0.4f)),
+    )
 }
 
 /**
@@ -262,10 +283,15 @@ private fun MicPanel(state: VoiceController.UiState, controller: VoiceController
         modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // Step 8/WF-6.
+        ImageCaptureRow(state, controller)
+        Spacer(Modifier.height(10.dp))
+
         Text(label, style = MaterialTheme.typography.headlineMedium, color = color)
         Spacer(Modifier.height(4.dp))
         Text(
             when {
+                state.pendingImageLabel != null -> "Hold to add a caption, or send without one"
                 state.awaitingAnswer -> "Your turn — hold to answer"
                 state.micState == VoiceController.MicState.AWAITING_CONFIRMATION ->
                     "Resolve the window above, or hold to talk about something else"
@@ -293,5 +319,47 @@ private fun MicPanel(state: VoiceController.UiState, controller: VoiceController
                     }
                 },
         )
+    }
+}
+
+/**
+ * Step 8 / WF-6: attach a photo (a grocery list, notes, a product) to the
+ * next turn. [ImageIntake.pickFile] opens a native, blocking dialog, so it
+ * runs on `Dispatchers.IO` via [rememberCoroutineScope] rather than the
+ * Compose/UI dispatcher — the same discipline every other blocking call in
+ * this codebase follows.
+ *
+ * Once a photo is attached, this becomes a small confirmation row instead:
+ * the filename, a way to send it with no caption, and a way to drop it.
+ */
+@Composable
+private fun ImageCaptureRow(state: VoiceController.UiState, controller: VoiceController) {
+    val scope = rememberCoroutineScope()
+
+    if (state.pendingImageLabel == null) {
+        AssistChip(
+            onClick = {
+                scope.launch {
+                    val path = withContext(Dispatchers.IO) { ImageIntake.pickFile() }
+                    if (path != null) controller.attachImage(path)
+                }
+            },
+            label = { Text("Attach a photo") },
+            colors = AssistChipDefaults.assistChipColors(labelColor = AppColors.Blue),
+        )
+        return
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Surface(color = AppColors.Ink.copy(alpha = 0.06f), shape = RoundedCornerShape(4.dp)) {
+            Text(
+                state.pendingImageLabel,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                style = MonoTextStyle,
+                color = AppColors.Ink,
+            )
+        }
+        AssistChip(onClick = { controller.sendPendingImage() }, label = { Text("Send") })
+        AssistChip(onClick = { controller.clearPendingImage() }, label = { Text("Remove") })
     }
 }

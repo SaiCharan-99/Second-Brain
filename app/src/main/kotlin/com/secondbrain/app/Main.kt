@@ -34,8 +34,15 @@ import com.secondbrain.app.vault.VaultBrowserController
 import com.secondbrain.app.voice.VoiceController
 import com.secondbrain.integrations.CalendarAdapter
 import com.secondbrain.integrations.GmailAdapter
+import com.secondbrain.agent.CommerceTools
+import com.secondbrain.integrations.DeviceId
+import com.secondbrain.integrations.FakeCommerceAdapter
 import com.secondbrain.integrations.GoogleAuth
+import com.secondbrain.integrations.McpClient
+import com.secondbrain.integrations.McpCommerceAdapter
+import com.secondbrain.integrations.McpOAuth
 import com.secondbrain.integrations.TokenStore
+import com.secondbrain.ports.CommercePort
 import com.secondbrain.model.AudioFormatSpec
 import com.secondbrain.model.ConfigException
 import com.secondbrain.model.ConfigLoader
@@ -119,6 +126,10 @@ private class AppSession(
     private val sttHttp: HttpClient,
     private val ttsHttp: HttpClient,
     private val tokenStore: TokenStore?,
+    /** Step 7. All null unless `commerce.enabled`; the last three only when live. */
+    private val zeptoTokenStore: TokenStore?,
+    private val mcpClient: McpClient?,
+    private val mcpOAuth: McpOAuth?,
     private val scope: CoroutineScope,
 ) {
     fun shutdown() {
@@ -130,12 +141,18 @@ private class AppSession(
         runCatching { vault.close() }
         runCatching { agentDb.close() }
         runCatching { tokenStore?.close() }
+        runCatching { mcpClient?.close() }
+        runCatching { mcpOAuth?.close() }
+        runCatching { zeptoTokenStore?.close() }
     }
 }
 
 private fun buildSession(): AppSession {
     val appConfig = ConfigLoader.load()
-    SecretRedactor.register(appConfig.stt.apiKey, appConfig.tts.apiKey)
+    // D-086: fallback keys registered alongside the primary ones so a
+    // fallback-path log line (attempt failures, exception messages) can never
+    // leak the second key any more than the first.
+    SecretRedactor.register(appConfig.stt.apiKey, appConfig.tts.apiKey, appConfig.stt.fallbackApiKey, appConfig.tts.fallbackApiKey)
 
     // EC-G1: fail fast and by name. config.example.toml's required list does
     // not include agent.api_key — :voice's own Step 1 harness genuinely does
@@ -210,6 +227,12 @@ private fun buildSession(): AppSession {
     }
     val confirmationGate = ConfirmationGate(actionLedger)
 
+    // ── Step 7 commerce handles, declared here so shutdown can reach them ───
+    var commercePort: CommercePort? = null
+    var zeptoTokenStore: TokenStore? = null
+    var mcpClient: McpClient? = null
+    var mcpOAuth: McpOAuth? = null
+
     // ── Google: optional (decision 16) ──────────────────────────────────────
     val googleConfigured = appConfig.google.clientId.isNotBlank() && appConfig.google.clientSecret.isNotBlank()
     var tokenStore: TokenStore? = null
@@ -244,6 +267,50 @@ private fun buildSession(): AppSession {
         val calendarTools = CalendarTools(calendarPort, confirmationGate, vault, turnClock, askUser)
         builder = calendarTools.register(builder)
     }
+
+    // ── Step 7: commerce. Optional and off by default (decision D-080) ──────
+    // Two independent switches, both timid on purpose. `enabled` is false
+    // because Zepto's MCP has no sandbox - "any order placed through the Zepto
+    // MCP will be processed as a real Zepto order" - and `use_fake` is true so
+    // that even once enabled, the default is the offline catalogue.
+    if (appConfig.commerce.enabled) {
+        val port: CommercePort = if (appConfig.commerce.useFake) {
+            log.warn("Commerce is using the DEMO catalogue. No real orders. The order window says so too.")
+            FakeCommerceAdapter()
+        } else {
+            zeptoTokenStore = TokenStore(root.resolve(appConfig.commerce.tokenStorePath))
+            val oauth = McpOAuth(
+                resourceUrl = appConfig.commerce.mcpUrl,
+                tokenStore = zeptoTokenStore,
+                redirectPort = appConfig.commerce.redirectPort,
+                clientId = appConfig.commerce.oauthClientId,
+                // DCR mints a client id on first run; persisting it means the
+                // next launch reuses it rather than registering again.
+                onClientRegistered = { id -> ConfigLoader.persistCommerceClientId(id) },
+            )
+            mcpOAuth = oauth
+            val client = McpClient(
+                endpoint = appConfig.commerce.mcpUrl,
+                tokenProvider = { oauth.accessToken() },
+                requestTimeoutMs = appConfig.commerce.requestTimeoutMs,
+            )
+            mcpClient = client
+            log.info("Commerce: LIVE against {}. Orders placed here are real.", appConfig.commerce.mcpUrl)
+            if (!oauth.isSignedIn()) {
+                log.warn("Not signed in to Zepto yet - the first grocery request will ask the user to sign in.")
+            }
+            // D-089: update_cart's required fallback cart key. Stable across
+            // restarts, generated once - see DeviceId's own doc.
+            val deviceId = DeviceId.stable(root.resolve("zepto_device_id.txt"))
+            McpCommerceAdapter(client, oauth, deviceId)
+        }
+        commercePort = port
+        val commerceTools = CommerceTools(port, confirmationGate, appConfig.commerce, vault)
+        builder = commerceTools.register(builder)
+    } else {
+        log.info("commerce.enabled = false - the grocery tools are not registered.")
+    }
+
     val registry = builder.build()
     val agentLoop = AgentLoop(llm, registry, ToolDispatcher(registry), prompts, appConfig.agent, turnClock)
 
@@ -286,16 +353,26 @@ private fun buildSession(): AppSession {
         costMeter = costMeter,
         prompts = prompts,
         confirmationGate = confirmationGate,
+        // Step 8 / D-082 gap 1: non-null only when commerce is live against
+        // the real Zepto MCP. FakeCommerceAdapter needs no sign-in, and
+        // commerce.enabled=false means mcpOAuth is never constructed at all.
+        commerceSignIn = mcpOAuth?.let { oauth -> { oauth.signIn() } },
+        isCommerceSignedIn = mcpOAuth?.let { oauth -> { oauth.isSignedIn() } } ?: { false },
     )
 
     val vaultController = VaultBrowserController(scope, vault)
 
     log.info(
-        "Second Brain ready. vault={} model={} caching={}",
-        root.resolve("vault"), appConfig.agent.model, if (appConfig.agent.cacheEnabled) "on" else "OFF",
+        "Second Brain ready. vault={} model={} caching={} commerce={}",
+        root.resolve("vault"), appConfig.agent.model,
+        if (appConfig.agent.cacheEnabled) "on" else "OFF",
+        commercePort?.displayName ?: "off",
     )
 
-    return AppSession(voiceController, vaultController, confirmationGate, calendarPort, vault, agentDb, sttHttp, ttsHttp, tokenStore, scope)
+    return AppSession(
+        voiceController, vaultController, confirmationGate, calendarPort, vault, agentDb,
+        sttHttp, ttsHttp, tokenStore, zeptoTokenStore, mcpClient, mcpOAuth, scope,
+    )
 }
 
 /**

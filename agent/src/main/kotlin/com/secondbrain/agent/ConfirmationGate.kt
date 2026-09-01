@@ -5,6 +5,7 @@ import com.secondbrain.model.EmailAddressValidator
 import com.secondbrain.model.EmailProposal
 import com.secondbrain.model.LedgerKind
 import com.secondbrain.model.LedgerState
+import com.secondbrain.model.OrderProposal
 import com.secondbrain.model.Proposal
 import com.secondbrain.model.ProposalField
 import com.secondbrain.model.FieldKind
@@ -84,6 +85,40 @@ class ConfirmationGate(
 
         /** EC-A8. */
         data object Busy : GateOutcome
+
+        /**
+         * EC-Z14: the user wants to change the proposal rather than accept or
+         * abandon it, and the change is one this window cannot make.
+         *
+         * ### Why this outcome has to exist
+         *
+         * [submit] suspends the calling tool handler, and therefore the whole
+         * agent loop, for as long as the window is open — and
+         * `VoiceController.turnMutex` queues any new utterance behind that. So
+         * while a proposal is open the model cannot run a turn, which means
+         * *nothing the user says can be acted on*. For email and calendar that
+         * is fine: every field is a string the window edits directly.
+         *
+         * For an order it is not. A cart lives on the far side of a network
+         * call — "drop the milk, and make it two breads" is two server
+         * mutations that can each be *rejected* (out of stock, quantity cap),
+         * and [editField] is synchronous and has nowhere to put that. WF-4's
+         * flow has no path for it either: its only loop-back adds more items.
+         *
+         * So revision is expressed by *ending* the gate. The tool handler gets
+         * this outcome, hands [instruction] back to the model as a normal
+         * `tool_result`, the model edits the real cart with the autonomous cart
+         * tools, re-reads it, and proposes again. Nothing is lost, because the
+         * cart was never local in the first place.
+         *
+         * Note what this deliberately does not do: it never approves anything.
+         * Speech opens a revision; only a click commits (R9).
+         *
+         * @param instruction what the user said, verbatim, if they spoke it.
+         *   Null when they simply pressed "Change something", in which case the
+         *   model is told to ask.
+         */
+        data class RevisionRequested(val instruction: String?) : GateOutcome
     }
 
     /** What an executor (`EmailTools`/`CalendarTools`) reports after the real call. */
@@ -106,6 +141,21 @@ class ConfirmationGate(
         val validationError: String? = null,
         /** EC-C4: informational only, never blocks. */
         val conflictWarning: String? = null,
+        /**
+         * EC-E3: shown after a [ExecutorResult.NeedsReauth], and deliberately
+         * NOT [validationError].
+         *
+         * These have opposite meanings for the Confirm button. A validation
+         * error means "this cannot be sent as it stands", so Confirm is
+         * disabled. A re-auth notice means "this is fine, the credentials
+         * weren't" — the whole point of EC-E3 is that the draft survives and
+         * the user can retry after re-authenticating. Putting the notice in
+         * [validationError] disabled the only button that could perform that
+         * retry, which made the gate permanently un-completable: the draft was
+         * preserved exactly as EC-E3 asks, and then nothing could ever be done
+         * with it except cancel.
+         */
+        val reauthNotice: String? = null,
     )
 
     private class Pending(
@@ -249,7 +299,8 @@ class ConfirmationGate(
         val current = _state.value?.takeIf { it.proposalId == proposalId } ?: return
         if (current.stage != Stage.READY || current.validationError != null) return
 
-        _state.value = current.copy(stage = Stage.EXECUTING)
+        // Clear any previous re-auth notice: this attempt supersedes it.
+        _state.value = current.copy(stage = Stage.EXECUTING, reauthNotice = null)
         ledger.transition(proposalId, LedgerState.EXECUTING)
         log.info("Gate {} -> EXECUTING", proposalId)
 
@@ -280,10 +331,34 @@ class ConfirmationGate(
                 ledger.transition(proposalId, LedgerState.APPROVED, error = outcome.reason)
                 _state.value = current.copy(
                     stage = Stage.READY,
-                    validationError = "Needs re-authentication: ${outcome.reason}. Fix that, then press Confirm again.",
+                    // reauthNotice, not validationError - see UiState.reauthNotice.
+                    // Confirm has to stay enabled for "press Confirm again" to
+                    // be something the user can actually do.
+                    reauthNotice = "Needs re-authentication: ${outcome.reason}. Sign in again, then press Confirm.",
                 )
             }
         }
+    }
+
+    /**
+     * EC-Z14: end the gate so the model can act on a change the window cannot
+     * make itself. See [GateOutcome.RevisionRequested] for the full reasoning.
+     *
+     * Ledger-wise this is a cancellation — nothing executed, and the row is
+     * closed with a reason that distinguishes it from the user walking away.
+     * The replacement proposal gets its own row and its own `proposal_id`,
+     * which is what R5 wants: one idempotency key per thing that could
+     * actually be executed, never a mutated one.
+     */
+    fun requestRevision(proposalId: String, instruction: String? = null) {
+        val pending = pendingRef.get()?.takeIf { it.proposalId == proposalId } ?: return
+        val current = _state.value?.takeIf { it.proposalId == proposalId } ?: return
+        // Same guard as cancel: once the real call is in flight, revising is
+        // no longer a thing that can happen.
+        if (current.stage == Stage.EXECUTING) return
+        ledger.transition(proposalId, LedgerState.CANCELLED, error = "revision_requested")
+        log.info("Gate {} - revision requested by user", proposalId)
+        pending.deferred.complete(GateOutcome.RevisionRequested(instruction?.takeIf { it.isNotBlank() }))
     }
 
     /** EC-E6: cancel at any stage up to (not including) EXECUTING — once the real call is in flight it is too late to cancel. */
@@ -345,6 +420,12 @@ class ConfirmationGate(
             "end" -> parseLocal(value, proposal.zoneId)?.let { proposal.copy(end = it) } ?: proposal
             else -> proposal
         }
+        // EC-Z15: an OrderProposal has no editable fields, by construction —
+        // its content is a server-side cart, and changing it is a network
+        // mutation this synchronous path cannot perform or report on.
+        // `CommerceTools` registers no ProposalField for it, so nothing can
+        // reach here; revision goes through requestRevision() instead.
+        is OrderProposal -> proposal
     }
 
     /** `ProposalWindow`'s time fields are edited as local ISO strings (no offset). */
@@ -376,6 +457,33 @@ class ConfirmationGate(
             proposal.location?.let { put("location", it) }
             proposal.description?.let { put("description", it) }
         }.toString()
+        // R6/EC-Z6: the snapshot is the *server's* cart as shown to the user,
+        // line by line, so the ledger records what they actually approved
+        // rather than a total they would have to take on trust.
+        is OrderProposal -> buildJsonObject {
+            put("payment_method", proposal.paymentMethod)
+            put("item_count", proposal.cart.itemCount)
+            put("subtotal_paise", proposal.cart.subtotal.paise)
+            put("delivery_fee_paise", proposal.cart.deliveryFee.paise)
+            put("total_paise", proposal.cart.total.paise)
+            put("cod_available", proposal.cart.codAvailable)
+            put("over_ceiling", proposal.overCeiling)
+            put("is_fake", proposal.isFake)
+            put("lines", JsonArray(proposal.cart.lines.map { line ->
+                buildJsonObject {
+                    put("line_id", line.lineId)
+                    put("product_id", line.productId)
+                    put("name", line.name)
+                    line.size?.let { put("size", it) }
+                    put("unit_price_paise", line.unitPrice.paise)
+                    put("quantity", line.quantity)
+                    put("added_this_session", line.addedThisSession)
+                }
+            }))
+            put("failed_items", JsonArray(proposal.failedItems.map {
+                buildJsonObject { put("requested", it.requested); put("reason", it.reason) }
+            }))
+        }.toString()
     }
 }
 
@@ -404,6 +512,29 @@ fun ConfirmationGate.GateOutcome.toToolOutcome(): ToolOutcome = when (this) {
         buildJsonObject {
             put("gate_busy", true)
             put("message", "Another confirmation window is already open. Wait for the user to resolve it, then propose this again.")
+        }.toString(),
+    )
+    // EC-Z14. Explicitly NOT an error and explicitly not `cancelled_by_user`:
+    // both of those tell the model to stop, and this means the opposite. The
+    // instruction is passed through verbatim rather than paraphrased, because
+    // "make it two, not four" only survives if the numbers do.
+    is ConfirmationGate.GateOutcome.RevisionRequested -> ToolOutcome(
+        buildJsonObject {
+            put("revision_requested", true)
+            if (instruction != null) {
+                put("user_said", instruction)
+                put(
+                    "next_step",
+                    "The user wants changes before ordering. Do exactly what they said using the cart tools, " +
+                        "then call commerce_propose_order again. Do not place anything.",
+                )
+            } else {
+                put(
+                    "next_step",
+                    "The user wants to change something but did not say what. Ask them with ask_user, make the " +
+                        "change with the cart tools, then call commerce_propose_order again.",
+                )
+            }
         }.toString(),
     )
 }

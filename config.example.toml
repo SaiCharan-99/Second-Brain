@@ -37,6 +37,13 @@ root = "~/.secondbrain"
 model   = "gemini-3.5-transcribe"
 api_key = ""                                   # REQUIRED  <-- your Gemini API key
 
+# D-086: OPTIONAL. Tried only once every attempt against api_key above has
+# failed (bad credentials, quota, transport - any reason). A free-tier key's
+# daily request quota is small enough that normal testing exhausts it; two
+# independent free projects roughly double the effective daily budget for
+# nothing. Leave blank for the original single-key behaviour.
+fallback_api_key = ""
+
 base_url = "https://generativelanguage.googleapis.com"
 
 # EC-V6: above this, audio must go through the Files API instead of inline
@@ -63,6 +70,11 @@ model    = "gemini-3.1-flash-tts-preview"
 voice    = "Kore"                              # a Gemini prebuilt voice name
 base_url = "https://generativelanguage.googleapis.com"
 api_key  = ""                                  # REQUIRED  <-- your Gemini API key
+
+# D-086: OPTIONAL, same mechanism as stt.fallback_api_key above — see its
+# comment. STT and TTS each fall back independently; this can be the same
+# second key as stt's, or a different one.
+fallback_api_key = ""
 
 # KokoroTts still exists in :voice, for anyone who points base_url at a
 # self-hosted endpoint instead — response_format and speed are read only by
@@ -353,3 +365,65 @@ redirect_port = 0
 # a clean, non-precious sub-domain (losing it just means one more consent
 # screen, not a rebuild).
 token_store_path = "oauth_tokens.db"
+
+# ─────────────────────────────────────────────────────────────────────────────
+[commerce]
+# OPTIONAL. Step 7: the Zepto grocery workflow (WF-4). Off by default, and the
+# defaults below are the timid ones on purpose.
+#
+# READ THIS BEFORE SETTING enabled = true WITH use_fake = false:
+# Zepto's MCP server has no sandbox. Their own documentation is explicit —
+# "any order placed through the Zepto MCP will be processed as a real Zepto
+# order." There is no test mode, no dry run, and no way to place a fake order
+# against the real endpoint. Everything below assumes you know that.
+enabled = false
+
+# true  = FakeCommerceAdapter. A deterministic offline catalogue with seeded
+#         stock-outs and price changes. No network, no money, and the order
+#         window renders a loud DEMO banner (Step 7 requires the fake be
+#         visibly labelled whenever it is active).
+# false = the real Zepto MCP server. Real orders.
+use_fake = true
+
+mcp_url = "https://mcp.zepto.co.in/mcp"
+
+# Filled in automatically on first sign-in via RFC 7591 Dynamic Client
+# Registration, then written back here so later launches reuse it. Leave blank.
+# A client id is a public identifier, not a secret — this server issues public
+# clients with no secret at all (token_endpoint_auth_method: none).
+oauth_client_id = ""
+
+# The loopback port for the OAuth redirect. Note this differs from [google]
+# above in two ways, both measured during spike S7.1 (D-079):
+#   1. It is fixed, not 0, because the port is baked into the redirect URI that
+#      gets registered.
+#   2. The redirect host is "localhost", NEVER "127.0.0.1". Registering a
+#      redirect URI containing the literal IP is rejected with a bare HTML 403
+#      by the WAF in front of Zepto's authorization server; "localhost"
+#      registers fine. This is the opposite of Google's own recommendation.
+redirect_port = 8765
+
+# Its own SQLite file under [paths].root, same reasoning as google.token_store_path.
+token_store_path = "zepto_tokens.db"
+
+# EC-Z17, and the most valuable safety control in this step.
+#
+# An order total above this needs a second, explicit acknowledgement in the
+# confirmation window before "Place order" becomes clickable. It is not a hard
+# block — a big shop is legitimate — it is there to catch the *silent* large
+# order. "Twenty kilos of rice" misheard from "two kilos" builds a perfectly
+# valid cart that nothing else in the pipeline has any reason to question.
+#
+# R7: this is a number in config and enforced in code, never a prompt asking
+# the model to be careful.
+order_ceiling_inr = 2000
+
+# EC-Z3: how many candidates a product search returns for the model to rank.
+max_search_results = 8
+
+# EC-Z13: an item extracted from a photographed list at or below this
+# confidence is read back for confirmation before it is searched for.
+low_confidence_threshold = 0.75
+
+request_timeout_ms = 30000
+max_attempts = 3

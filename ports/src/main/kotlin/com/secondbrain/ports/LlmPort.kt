@@ -93,6 +93,19 @@ sealed interface LlmBlock {
         val content: String,
         val isError: Boolean = false,
     ) : LlmBlock
+
+    /**
+     * A photo attached to a user turn — grocery lists, handwritten notes,
+     * product packaging (Step 8, WF-6).
+     *
+     * [mediaType] is a plain wire string (`"image/jpeg"`), not the SDK's own
+     * enum, matching this port's independence from Jackson/the Anthropic SDK
+     * (D-044): `ClaudeClient` is the one place allowed to know that enum
+     * exists. `ImageIntake` (`:app`) always produces `"image/jpeg"`; the field
+     * stays a string rather than a closed set so a future intake path (a
+     * screenshot as PNG, say) does not need a port change to use one.
+     */
+    data class Image(val base64: String, val mediaType: String) : LlmBlock
 }
 
 /** A tool as the model sees it. [toolClass] is ours; the API never sees it. */

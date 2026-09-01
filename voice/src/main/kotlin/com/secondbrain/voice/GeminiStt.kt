@@ -97,6 +97,29 @@ class GeminiStt(
         }
 
         val body = requestBody(bytes)
+
+        val primary = attemptWithKey(config.apiKey, body, utteranceId, started)
+        if (primary.status != com.secondbrain.model.SttStatus.FAILED) return primary
+
+        // D-086: a second free-tier key, tried only after the first has fully
+        // failed - any reason, not just quota, since a wrong or revoked
+        // primary key (401/403) is exactly as recoverable this way as a 429
+        // is. Never attempted when unconfigured; every existing single-key
+        // deployment behaves identically to before this existed.
+        val fallbackKey = config.fallbackApiKey
+        if (fallbackKey.isNullOrBlank()) return primary
+
+        log.warn("Primary Gemini key failed for STT ({}); retrying with the fallback key.", primary.error)
+        return attemptWithKey(fallbackKey, body, utteranceId, started)
+    }
+
+    /** One full attempt cycle (up to `config.maxAttempts`) against a single key. */
+    private suspend fun attemptWithKey(
+        apiKey: String,
+        body: JsonObject,
+        utteranceId: String,
+        started: Long,
+    ): Transcript {
         var lastError: String? = null
 
         for (attempt in 1..config.maxAttempts) {
@@ -105,7 +128,7 @@ class GeminiStt(
                     contentType(ContentType.Application.Json)
                     // Header rather than ?key= so the secret never enters a URL,
                     // which is the thing that ends up in logs and stack traces.
-                    header("x-goog-api-key", config.apiKey)
+                    header("x-goog-api-key", apiKey)
                     setBody(body.toString())
                 }
 

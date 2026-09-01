@@ -1,10 +1,7 @@
 package com.secondbrain.model
 
-/**
- * ARCHITECTURE §2's `action_ledger.kind`. No `ORDER_PLACE` yet — see
- * [ProposalKind]'s doc for why that waits for Step 7.
- */
-enum class LedgerKind { EMAIL_SEND, CALENDAR_CREATE }
+/** ARCHITECTURE §2's `action_ledger.kind`. */
+enum class LedgerKind { EMAIL_SEND, CALENDAR_CREATE, ORDER_PLACE }
 
 /**
  * ARCHITECTURE §2's `action_ledger.state`, verbatim. R5: "`proposal_id` is the

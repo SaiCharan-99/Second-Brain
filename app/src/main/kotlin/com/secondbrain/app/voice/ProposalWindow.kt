@@ -40,9 +40,11 @@ import com.secondbrain.agent.ConfirmationGate
 import com.secondbrain.app.AppColors
 import com.secondbrain.app.MonoTextStyle
 import com.secondbrain.model.CalendarProposal
+import com.secondbrain.model.CartLine
 import com.secondbrain.model.EmailProposal
 import com.secondbrain.model.FieldKind
 import com.secondbrain.model.LedgerKind
+import com.secondbrain.model.OrderProposal
 import com.secondbrain.model.ProposalField
 import com.secondbrain.ports.CalendarPort
 import kotlinx.coroutines.CoroutineScope
@@ -84,9 +86,17 @@ fun ProposalWindow(
                 when (val proposal = current.proposal) {
                     is EmailProposal -> EmailBody(current, gate)
                     is CalendarProposal -> CalendarBody(current, proposal, gate, calendarPort, scope)
+                    is OrderProposal -> OrderBody(proposal)
                 }
 
                 current.conflictWarning?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Banner(it, AppColors.Amber)
+                }
+                // EC-E3. Amber, not red, and it does not disable Confirm — the
+                // draft is intact and pressing Confirm again after signing in
+                // is exactly what the user is being asked to do.
+                current.reauthNotice?.let {
                     Spacer(Modifier.height(10.dp))
                     Banner(it, AppColors.Amber)
                 }
@@ -109,6 +119,7 @@ private fun Header(state: ConfirmationGate.UiState) {
     val label = when (state.proposal.kind) {
         LedgerKind.EMAIL_SEND -> "EMAIL — pending your approval"
         LedgerKind.CALENDAR_CREATE -> "CALENDAR EVENT — pending your approval"
+        LedgerKind.ORDER_PLACE -> "ORDER — pending your approval"
     }
     Column {
         Text(label, style = MaterialTheme.typography.labelLarge, color = AppColors.Blue, fontWeight = FontWeight.SemiBold)
@@ -160,6 +171,137 @@ private fun CalendarBody(
         state.fields.firstOrNull { it.id == "location" }?.let { EditableRow(it, gate, state.proposalId) }
         state.fields.firstOrNull { it.id == "description" }?.let { EditableRow(it, gate, state.proposalId, singleLine = false) }
         state.fields.firstOrNull { it.id == "attendees" }?.let { VerbatimAwareField(it, gate, state.proposalId, state.stage) }
+    }
+}
+
+// ── Order ────────────────────────────────────────────────────────────────
+
+/**
+ * WF-4's order window: *"full itemised cart, pre-existing items flagged, failed
+ * items shown **above** the total."*
+ *
+ * Read-only, deliberately, and this is the one proposal type where that is a
+ * design decision rather than a shortcut (EC-Z15). The other two edit a local
+ * payload; a cart line lives on the server, so changing one is a network call
+ * that can be refused. Editing it here would mean a text field that sometimes
+ * silently fails. Instead the user says what they want changed — the mic stays
+ * live while this is open — and the model does it with the cart tools and
+ * proposes again. See [ConfirmationGate.GateOutcome.RevisionRequested].
+ */
+@Composable
+private fun OrderBody(proposal: OrderProposal) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+        // Step 7's exit criterion: "a demo toggle... visibly labelled in the UI
+        // when the fake is active. Never demo a fake without saying so."
+        if (proposal.isFake) {
+            Banner("DEMO CATALOGUE — this is not a real order and nothing will be delivered.", AppColors.Amber)
+        }
+
+        // EC-Z10: above the total, always. A failure the user only notices
+        // after they have read the price is a failure they did not notice.
+        if (proposal.failedItems.isNotEmpty()) {
+            Surface(
+                color = AppColors.Dangling.copy(alpha = 0.10f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(10.dp)) {
+                    Text(
+                        "NOT IN THIS ORDER",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AppColors.Dangling,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    proposal.failedItems.forEach {
+                        Text(
+                            "${it.requested} — ${it.reason}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.Ink,
+                        )
+                    }
+                }
+            }
+        }
+
+        proposal.cart.lines.forEach { line -> CartLineRow(line) }
+
+        HorizontalDivider(color = AppColors.Border)
+
+        TotalRow("Subtotal", proposal.cart.subtotal.format())
+        if (proposal.cart.deliveryFee.paise > 0) {
+            TotalRow("Delivery", proposal.cart.deliveryFee.format())
+        }
+        TotalRow("Total", proposal.cart.total.format(), emphasise = true)
+
+        Text(
+            proposal.paymentMethod,
+            style = MaterialTheme.typography.bodySmall,
+            color = AppColors.Muted,
+        )
+
+        // EC-Z17. Not a block — a large order can be legitimate — but it must
+        // not be possible to approve one without having been told.
+        if (proposal.overCeiling) {
+            Banner(
+                "This is over your usual limit of ${proposal.ceiling?.format() ?: "—"}. " +
+                    "Check the quantities before you place it.",
+                AppColors.Red,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CartLineRow(line: CartLine) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(line.name, style = MaterialTheme.typography.bodyMedium, color = AppColors.Ink)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    buildString {
+                        line.size?.let { append(it).append("  ·  ") }
+                        append("×${line.quantity}")
+                        append("  ·  ").append(line.unitPrice.format()).append(" each")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppColors.Muted,
+                )
+            }
+            // EC-Z7: a line that was in the cart before this session started
+            // must not read as something we just added on their behalf.
+            if (!line.addedThisSession) {
+                Text(
+                    "was already in your cart",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AppColors.Amber,
+                )
+            }
+        }
+        Text(line.lineTotal.format(), style = MonoTextStyle, color = AppColors.Ink)
+    }
+}
+
+@Composable
+private fun TotalRow(label: String, value: String, emphasise: Boolean = false) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (emphasise) AppColors.Ink else AppColors.Muted,
+            fontWeight = if (emphasise) FontWeight.SemiBold else FontWeight.Normal,
+        )
+        Text(
+            value,
+            style = MonoTextStyle,
+            color = AppColors.Ink,
+            fontWeight = if (emphasise) FontWeight.SemiBold else FontWeight.Normal,
+        )
     }
 }
 
@@ -236,8 +378,15 @@ private fun EditableRow(
 
 @Composable
 private fun Actions(state: ConfirmationGate.UiState, gate: ConfirmationGate, scope: CoroutineScope) {
+    val isOrder = state.proposal.kind == LedgerKind.ORDER_PLACE
+
     when (state.stage) {
-        ConfirmationGate.Stage.CONTENT_REVIEW -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        // An order has nothing to review in two stages - no verbatim fields, no
+        // editable content - so it goes straight to the committing button
+        // rather than making the user press Approve and then Place order.
+        ConfirmationGate.Stage.CONTENT_REVIEW -> if (isOrder) {
+            OrderActions(state, gate, scope)
+        } else Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = { gate.cancel(state.proposalId) }) { Text("Cancel") }
             Button(
                 onClick = { gate.confirmContent(state.proposalId) },
@@ -247,7 +396,9 @@ private fun Actions(state: ConfirmationGate.UiState, gate: ConfirmationGate, sco
 
         ConfirmationGate.Stage.VERBATIM_VERIFY -> VerbatimStage(state, gate)
 
-        ConfirmationGate.Stage.READY -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        ConfirmationGate.Stage.READY -> if (isOrder) {
+            OrderActions(state, gate, scope)
+        } else Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = { gate.cancel(state.proposalId) }) { Text("Cancel") }
             Button(
                 onClick = { scope.launch { gate.confirmExecute(state.proposalId) } },
@@ -259,8 +410,60 @@ private fun Actions(state: ConfirmationGate.UiState, gate: ConfirmationGate, sco
         }
 
         ConfirmationGate.Stage.EXECUTING -> Text(
-            if (state.proposal.kind == LedgerKind.EMAIL_SEND) "Sending…" else "Creating…",
+            when (state.proposal.kind) {
+                LedgerKind.EMAIL_SEND -> "Sending…"
+                LedgerKind.CALENDAR_CREATE -> "Creating…"
+                LedgerKind.ORDER_PLACE -> "Placing your order…"
+            },
             style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.Muted,
+        )
+    }
+}
+
+/**
+ * The order window's three buttons, and the reason there are three.
+ *
+ * "Change something" is EC-Z14's click-driven half. The spoken half — saying
+ * *"drop the milk"* while this window is open — reaches the same
+ * [ConfirmationGate.requestRevision] through `VoiceController`, carrying the
+ * words with it. This button is the fallback for when the user would rather
+ * click than talk, and it asks the model to ask them what to change.
+ *
+ * Placing the order stays a click, always. R9's second sanctioned exception is
+ * "one button press per irreversible action", and this is that press — speech
+ * can open a revision but never commits money.
+ */
+@Composable
+private fun OrderActions(state: ConfirmationGate.UiState, gate: ConfirmationGate, scope: CoroutineScope) {
+    val order = state.proposal as? OrderProposal
+    var ceilingAcknowledged by remember(state.proposalId) { mutableStateOf(false) }
+    val needsAcknowledgement = order?.overCeiling == true && !ceilingAcknowledged
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // EC-Z17: over the ceiling, the commit button is gated behind an
+        // explicit "yes, I meant that much" rather than merely a warning above
+        // a button that is still one click away.
+        if (needsAcknowledgement) {
+            OutlinedButton(
+                onClick = { ceilingAcknowledged = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("I've checked the quantities — this total is right") }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(onClick = { gate.cancel(state.proposalId) }) { Text("Cancel") }
+            OutlinedButton(onClick = { gate.requestRevision(state.proposalId) }) { Text("Change something") }
+            Button(
+                onClick = { scope.launch { gate.confirmExecute(state.proposalId) } },
+                enabled = state.validationError == null && !needsAcknowledgement,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Red, contentColor = Color.White),
+            ) { Text("Place order") }
+        }
+
+        Text(
+            "Or just say what you'd like changed.",
+            style = MaterialTheme.typography.labelSmall,
             color = AppColors.Muted,
         )
     }

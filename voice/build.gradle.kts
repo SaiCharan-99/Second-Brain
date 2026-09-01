@@ -18,6 +18,8 @@ dependencies {
     implementation(libs.slf4j.api)
 
     runtimeOnly(libs.logback.classic)
+
+    testImplementation(libs.ktor.client.mock)
 }
 
 // Step 1 exit criterion: `./gradlew :voice:run`.

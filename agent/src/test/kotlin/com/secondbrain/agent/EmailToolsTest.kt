@@ -22,6 +22,12 @@ import java.nio.file.Path
  */
 class EmailToolsTest {
 
+    private val databases = TestDatabases()
+
+    @org.junit.jupiter.api.AfterEach
+    fun closeTrackedDatabases() = databases.closeAll()
+
+
     private class FakeMail(private val outcome: SendOutcome) : MailPort {
         var sent: EmailProposal? = null
         var calls = 0
@@ -32,7 +38,7 @@ class EmailToolsTest {
         }
     }
 
-    private fun gate(dir: Path) = ConfirmationGate(ActionLedger(AgentDb(dir.resolve("app.db"))))
+    private fun gate(dir: Path) = ConfirmationGate(ActionLedger(databases.open(dir)))
 
     private fun dispatcherFor(mail: MailPort, gate: ConfirmationGate): ToolDispatcher {
         val tools = EmailTools(mail, gate) { _, _ -> VaultTools.AskResult.NoAnswer("not exercised here") }

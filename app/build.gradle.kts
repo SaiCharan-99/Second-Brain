@@ -77,3 +77,15 @@ tasks.register<JavaExec>("capture") {
     standardInput = System.`in`
     jvmArgs("-Dfile.encoding=UTF-8")
 }
+
+// D-082/D-087: dumps the real Zepto MCP tools/list once a sign-in exists, so
+// McpCommerceAdapter's role bindings and response parsers can be checked
+// against what the server actually returns instead of the doc-derived guess
+// D-079 shipped with. See ZeptoDiscovery.kt.
+tasks.register<JavaExec>("zeptoDiscover") {
+    group = "verification"
+    description = "Dumps Zepto's real tools/list (names, descriptions, schemas). Requires a completed sign-in."
+    mainClass.set("com.secondbrain.app.ZeptoDiscoveryKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs("-Dfile.encoding=UTF-8")
+}

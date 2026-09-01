@@ -76,6 +76,23 @@ class GeminiTts(
     }
 
     private suspend fun synthesizeOne(sentence: String): Pair<ByteArray, AudioFormatSpec> {
+        val primaryKey = config.apiKey.orEmpty()
+        return try {
+            attemptWithKey(primaryKey, sentence)
+        } catch (primaryFailure: TtsUnavailableException) {
+            // D-086: same fallback mechanism as GeminiStt — see SttConfig's doc.
+            // Tried on ANY failure the primary key produced, retryable or not,
+            // since a bad/revoked primary key is exactly as recoverable this
+            // way as an exhausted quota is.
+            val fallbackKey = config.fallbackApiKey
+            if (fallbackKey.isNullOrBlank()) throw primaryFailure
+            log.warn("Primary Gemini key failed for TTS ({}); retrying with the fallback key.", primaryFailure.message)
+            attemptWithKey(fallbackKey, sentence)
+        }
+    }
+
+    /** One full attempt cycle (up to `config.maxAttempts`) against a single key. */
+    private suspend fun attemptWithKey(apiKey: String, sentence: String): Pair<ByteArray, AudioFormatSpec> {
         var lastError: String? = null
 
         for (attempt in 1..config.maxAttempts) {
@@ -84,7 +101,7 @@ class GeminiTts(
                     contentType(ContentType.Application.Json)
                     // Header rather than ?key=, matching GeminiStt — the secret
                     // never enters a URL, which is what ends up in logs.
-                    header("x-goog-api-key", config.apiKey.orEmpty())
+                    header("x-goog-api-key", apiKey)
                     setBody(requestBody(sentence).toString())
                 }
 

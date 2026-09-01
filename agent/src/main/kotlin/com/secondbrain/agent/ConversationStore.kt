@@ -70,6 +70,9 @@ class ConversationStore(
         val toolUseId: String? = null,
         val content: String? = null,
         val isError: Boolean = false,
+        /** Step 8/WF-6. Persisted verbatim so a reloaded conversation replays identically — see [encode]'s doc note on why this can't be dropped. */
+        val base64: String? = null,
+        val mediaType: String? = null,
     )
 
     @Serializable
@@ -89,6 +92,14 @@ class ConversationStore(
                     is LlmBlock.Thinking -> StoredBlock("thinking", text = block.thinking, signature = block.signature)
                     is LlmBlock.ToolUse -> StoredBlock("tool_use", id = block.id, name = block.name, inputJson = block.inputJson)
                     is LlmBlock.ToolResult -> StoredBlock("tool_result", toolUseId = block.toolUseId, content = block.content, isError = block.isError)
+                    // Persisted whole, base64 included, not dropped or
+                    // referenced-by-path: a reload mid-window with a later
+                    // tool_result talking about "the attached photo" needs
+                    // that photo still present to replay coherently. app.db
+                    // is precious and unbounded by design (R10) - this just
+                    // means a photo-heavy session grows it faster than a
+                    // text-only one, which D-084 records as accepted.
+                    is LlmBlock.Image -> StoredBlock("image", base64 = block.base64, mediaType = block.mediaType)
                 }
             },
         ),
@@ -104,6 +115,7 @@ class ConversationStore(
                     "thinking" -> LlmBlock.Thinking(block.text.orEmpty(), block.signature)
                     "tool_use" -> LlmBlock.ToolUse(block.id.orEmpty(), block.name.orEmpty(), block.inputJson ?: "{}")
                     "tool_result" -> LlmBlock.ToolResult(block.toolUseId.orEmpty(), block.content.orEmpty(), block.isError)
+                    "image" -> LlmBlock.Image(block.base64.orEmpty(), block.mediaType ?: "image/jpeg")
                     else -> null
                 }
             },

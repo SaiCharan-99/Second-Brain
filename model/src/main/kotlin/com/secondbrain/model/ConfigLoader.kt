@@ -67,6 +67,57 @@ object ConfigLoader {
         }
     }
 
+    /**
+     * Writes back the OAuth client id that Dynamic Client Registration minted
+     * for the commerce provider (Step 7).
+     *
+     * The one thing in this system that edits config.toml rather than only
+     * reading it, and it is deliberately narrow: append-if-absent for a single
+     * non-secret key. A client id is a public identifier, not a credential —
+     * this server issues public clients with no secret at all — so unlike every
+     * other value under `[commerce]` it is safe to persist in a file the user
+     * may read.
+     *
+     * Failing is a warning, not an error: without this the next launch simply
+     * registers again, which works, so an unwritable config must never stop the
+     * app.
+     */
+    fun persistCommerceClientId(
+        clientId: String,
+        env: Map<String, String> = System.getenv(),
+        userHome: String = System.getProperty("user.home"),
+    ) {
+        if (clientId.isBlank()) return
+        val path = resolveRoot(env, userHome).resolve(CONFIG_FILE)
+        runCatching {
+            if (!Files.exists(path)) return
+            val text = Files.readString(path)
+            if (text.contains(Regex("^\\s*oauth_client_id\\s*=\\s*\"[^\"]+\"", RegexOption.MULTILINE))) {
+                // Already set to something. Replace rather than duplicate the key.
+                Files.writeString(
+                    path,
+                    text.replace(
+                        Regex("^(\\s*oauth_client_id\\s*=\\s*)\"[^\"]*\"", RegexOption.MULTILINE),
+                        "$1\"$clientId\"",
+                    ),
+                )
+            } else if (text.contains(Regex("^\\s*\\[commerce]", RegexOption.MULTILINE))) {
+                Files.writeString(
+                    path,
+                    text.replace(
+                        Regex("^(\\s*\\[commerce]\\s*)$", RegexOption.MULTILINE),
+                        "$1\noauth_client_id = \"$clientId\"",
+                    ),
+                )
+            } else {
+                Files.writeString(path, text.trimEnd() + "\n\n[commerce]\noauth_client_id = \"$clientId\"\n")
+            }
+        }.onFailure {
+            // Never fatal. Re-registering on the next launch is a supported path.
+            System.err.println("Could not save the commerce client id to config.toml: ${it.message}")
+        }
+    }
+
     fun resolveRoot(
         env: Map<String, String> = System.getenv(),
         userHome: String = System.getProperty("user.home"),

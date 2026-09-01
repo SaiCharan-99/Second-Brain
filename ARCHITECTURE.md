@@ -635,6 +635,26 @@ flowchart LR
 
 ---
 
+### WF-6 — Photo capture (Step 8, added after the original 7-step plan)
+
+Not a new tool, a new *input*. A photo attaches to a turn the same way an utterance does, and the model handles it with tools that already exist — no OCR pipeline, no vision-extraction tool, no per-photo-type branch in code.
+
+```
+User attaches a photo (file picker) --> ImageIntake downscales + JPEG-encodes it
+  --> held as pendingImage
+User holds mic and speaks a caption, OR presses "Send without caption"
+  --> the photo rides along as an LlmBlock.Image on that turn, image block first
+Claude sees the photo directly (native vision) and decides what it is:
+  a list       --> commerce_save_list, then the normal WF-4 search/confirm/add loop
+  notes        --> vault_write_note / vault_append_note, one thought per note (WF-1)
+  a product    --> commerce_search on what the packaging says, then WF-4's
+                    unchanged read-back-and-confirm — a photo shortens finding
+                    the product, never confirming it
+  unclear      --> ask_user
+```
+
+R1 still holds: the model produces structured tool calls, deterministic Kotlin does everything after. The only new plumbing is getting the bytes onto the wire — `LlmBlock.Image` through `LlmPort`, `ClaudeClient`, `AgentLoop.run`, persisted verbatim in `ConversationStore` so a reloaded conversation replays identically.
+
 ## 6. Edge case catalogue
 
 Referenced by ID from `CLAUDE.md` and from tests. Every one of these needs a test or an explicit "accepted risk" note in `DECISIONS.md`.
@@ -736,6 +756,33 @@ Referenced by ID from `CLAUDE.md` and from tests. Every one of these needs a tes
 | EC-Z11 | MCP schema doesn't map cleanly to an Anthropic tool schema | Skip the tool, log it loudly at startup, continue with the rest. One bad schema must not kill the session. |
 | EC-Z12 | An unclassifiable MCP tool | Defaults to **gated**. Fail closed. |
 | EC-Z13 | Handwritten list is illegible | Claude vision returns per-item confidence. Low-confidence items are read back explicitly for confirmation before searching. |
+
+**Added in Step 7 (D-080).** Found while building WF-4 against the real endpoint. EC-Z14 is the structural one; the rest fall out of it or out of the cart being server state rather than a local payload.
+
+| ID | Case | Handling |
+|---|---|---|
+| EC-Z14 | **User wants to change the cart while the order window is open** — "drop the milk", "make it two not four" | The gate suspends the agent loop, so no turn can run to act on speech while a proposal is open. WF-4's only loop-back adds items; there is no path to remove or reduce. A third resolution, `GateOutcome.RevisionRequested`, ends the gate and hands the user's words back as a `tool_result`; the model edits the server cart with the autonomous cart tools and re-proposes. Speech opens a revision, a click still commits. |
+| EC-Z15 | Cart "fields" are not editable strings | Every other proposal is a local payload edited in place by a synchronous `editField`. A cart line lives on the server and changing it is a network call that can be *refused*. `OrderProposal` therefore registers no editable fields at all; revision is the only path. |
+| EC-Z16 | Mutation Classifier gates cart edits | `remove` is in WF-4's gate regex, so `cart_remove_item` → GATED → a modal per item, and R9's "one press per irreversible action" becomes a dozen. Cart staging is reversible and pre-transactional; only the transaction is irreversible. Three tiers: transaction verbs → GATED (checked first), cart nouns → AUTONOMOUS, everything else → the original regex, then fail closed. |
+| EC-Z17 | No ceiling on the order total | EC-G2 caps *Claude spend*; nothing capped the *order*. "Twenty kilos of rice" misheard from "two" builds a valid cart nothing questions. `commerce.order_ceiling_inr` forces a second explicit acknowledgement above it. Not a block. |
+| EC-Z18 | Lost response on a **cart write**, not just the order | EC-Z8 covers the order only. A timed-out `add_to_cart` may or may not have applied, and retrying blind double-adds. Returns `CartMutation.Unknown`; the only sanctioned response is to re-read and look. |
+| EC-Z19 | Phase window drops the early cart | R8 keeps the last 8 turns, so a long grocery session loses what was added first. The model's memory of the cart is never authoritative *at any point* — not merely before proposing (EC-Z6). Every mutation returns the whole server cart. |
+| EC-Z20 | User units vs pack units | "Two kilos" against a 1 kg pack is quantity 2, not one 2 kg pack. EC-Z4 puts pack size in the read-back but not the arithmetic. The tool schema says packs explicitly, and which pack was chosen is stated aloud. |
+| EC-Z21 | COD lapses mid-proposal | COD eligibility usually depends on the cart total, so revising downward past a minimum withdraws it after EC-Z9's check already passed. Re-checked on every fresh read, not once. |
+| EC-Z22 | MCP session dies holding a half-built cart | EC-Z1 covers "unreachable at start". A `404` on a request carrying a session id means the session is gone, not the endpoint: reset and re-handshake, and tell the user the cart may not be there. |
+| EC-Z23 | "Remove the milk" — from the list or the cart? | The cart is the only live object. The vault note written by EC-Z1 is an immutable record of what was *asked for* and is never edited to match the cart. |
+
+### Photos (Step 8, WF-6 — added after the original 7-step plan, D-084)
+
+| ID | Case | Handling |
+|---|---|---|
+| EC-I1 | A phone photo runs several MB at 4000×3000+ | `ImageIntake` downscales to a 1568px long edge before it ever reaches Claude — past that, resolution buys no reading accuracy and only costs upload time and tokens. Never upscales. |
+| EC-I2 | What kind of photo is this — a list, notes, or a product? | Not classified by a separate step. The model sees the image directly (no OCR pipeline of our own) and decides from the image plus whatever the user said, exactly as EC-V8 already governs speech: never keyword-routed, ask rather than guess. |
+| EC-I3 | No spoken caption at all | "Send without caption" attaches a fixed placeholder utterance; the Photos section of the system prompt is what actually tells the model what to do, not the caption. |
+| EC-I4 | A list photo has an illegible item | Same rule as EC-Z13: say which item and ask, never guess at what it says. |
+| EC-I5 | A product photo | Identifying the product from its packaging shortens *finding* it, never *confirming* it — the same name/size/price read-back and yes/no as a spoken product name applies unchanged (WF-4's "never silently substitute"). |
+| EC-I6 | Several distinct notes in one photo (a page, a whiteboard) | "One thought, one note" (WF-1) applies exactly as it does to speech — several thoughts in one photo are several `vault_write_note` calls, not one. |
+| EC-I7 | A photo attached mid-conversation, unrelated to what's being discussed | Held (`pendingImage`) until the next turn that actually sends, spoken or not — never auto-attached to an in-flight turn it wasn't part of. |
 
 ### Config & cost
 

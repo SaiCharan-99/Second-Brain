@@ -101,6 +101,11 @@ class AgentLoop(
      *   no real recording to time-stamp.
      * @param zone EC-C3: the zone the utterance was spoken in, stored as an
      *   ID and never a fixed offset.
+     * @param images Step 8/WF-6: photos attached to this turn — a grocery
+     *   list, handwritten notes, a product's packaging. Placed *before* the
+     *   text block in the user message, per Anthropic's own guidance that an
+     *   image grounds better when it precedes the prose describing it. Empty
+     *   for every pre-Step-8 call site; nothing about a text-only turn changes.
      */
     suspend fun run(
         utterance: String,
@@ -111,15 +116,14 @@ class AgentLoop(
         cancellation: Cancellation = Cancellation(),
         utteranceAt: Instant = Instant.now(),
         zone: ZoneId = ZoneId.systemDefault(),
+        images: List<LlmBlock.Image> = emptyList(),
     ): TurnOutput {
         val started = System.currentTimeMillis()
         turnClock.set(utteranceAt, zone)
 
         val messages = history.toMutableList()
-        messages += LlmMessage(
-            LlmMessage.Role.USER,
-            listOf(LlmBlock.Text(prompts.userTurn(utterance, now = utteranceAt, zone = zone))),
-        )
+        val userBlocks: List<LlmBlock> = images + LlmBlock.Text(prompts.userTurn(utterance, now = utteranceAt, zone = zone))
+        messages += LlmMessage(LlmMessage.Role.USER, userBlocks)
 
         val toolEvents = mutableListOf<ToolEvent>()
         var usage = TurnUsage.ZERO

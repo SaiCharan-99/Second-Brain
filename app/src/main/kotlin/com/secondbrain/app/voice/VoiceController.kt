@@ -8,6 +8,7 @@ import com.secondbrain.agent.SystemPrompt
 import com.secondbrain.agent.VaultTools
 import com.secondbrain.model.AppConfig
 import com.secondbrain.model.AudioFormatSpec
+import com.secondbrain.model.LedgerKind
 import com.secondbrain.model.Phase
 import com.secondbrain.model.SpeechRequest
 import com.secondbrain.model.SttStatus
@@ -45,6 +46,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
+import java.time.Instant
+import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -85,6 +88,16 @@ class VoiceController(
      * simply never sees a non-null state.
      */
     private val confirmationGate: ConfirmationGate,
+    /**
+     * Step 8: non-null only when commerce is live against the real Zepto MCP
+     * (`McpOAuth` exists — see `Main.kt`). Null when commerce is off or using
+     * `FakeCommerceAdapter`, which needs no sign-in at all. A lambda rather
+     * than the `McpOAuth` type itself so this file stays decoupled from
+     * `:integrations` the same way every other constructor parameter here is
+     * a `:ports`/`:agent` type, never a concrete adapter.
+     */
+    private val commerceSignIn: (suspend () -> Result<Unit>)? = null,
+    private val isCommerceSignedIn: () -> Boolean = { false },
 ) {
     private val log = LoggerFactory.getLogger(VoiceController::class.java)
 
@@ -127,10 +140,27 @@ class VoiceController(
         val micDeviceLabel: String = "",
         /** Non-null while `request_typed_input` is waiting on a typed value. */
         val pendingTypedInput: TypedInputRequest? = null,
+        /** Step 8: true iff commerce is live against the real Zepto MCP — see [commerceSignIn]'s own doc. */
+        val commerceLive: Boolean = false,
+        val commerceSignedIn: Boolean = false,
+        /** Step 8/WF-6: filename of a photo attached and waiting to go out with the next turn. */
+        val pendingImageLabel: String? = null,
     )
 
-    private val _state = MutableStateFlow(UiState(micDeviceLabel = micDeviceLabel))
+    private val _state = MutableStateFlow(
+        UiState(
+            micDeviceLabel = micDeviceLabel,
+            commerceLive = commerceSignIn != null,
+            commerceSignedIn = isCommerceSignedIn(),
+        )
+    )
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    /** Step 8/WF-6: a photo picked via [attachImage], waiting for the next turn to carry it. */
+    private data class PendingImage(val label: String, val block: LlmBlock.Image)
+
+    @Volatile
+    private var pendingImage: PendingImage? = null
 
     private val lineId = AtomicLong(0)
 
@@ -276,6 +306,73 @@ class VoiceController(
         playback.stop()
     }
 
+    // ── Step 8: photo capture (WF-6) ────────────────────────────────────────
+
+    /**
+     * A photo has been picked (via [ImageIntake.pickFile], called by
+     * [com.secondbrain.app.voice.VoiceScreen] off the UI thread). Resizes and
+     * encodes it, then holds it until the next turn — either a spoken caption
+     * (normal hold-to-talk; see [processUtterance]'s pending-image check) or
+     * [sendPendingImage] with none.
+     *
+     * A second call before the first is sent replaces the pending photo
+     * rather than queuing two — there is one turn to attach to, so there is
+     * one slot.
+     */
+    fun attachImage(path: java.nio.file.Path) {
+        val block = try {
+            ImageIntake.encodeForVision(path)
+        } catch (e: Exception) {
+            log.warn("Could not read image {}: {}", path, e.message)
+            _state.update { it.copy(statusLine = "Couldn't read that image: ${e.message}") }
+            return
+        }
+        pendingImage = PendingImage(path.fileName.toString(), block)
+        _state.update { it.copy(pendingImageLabel = path.fileName.toString(), statusLine = "") }
+    }
+
+    fun clearPendingImage() {
+        pendingImage = null
+        _state.update { it.copy(pendingImageLabel = null) }
+    }
+
+    /**
+     * Sends the pending photo with no spoken caption. [DEFAULT_IMAGE_CAPTION]
+     * stands in for one — the system prompt's Photos section tells the model
+     * to look at what it sees and decide, same as it would from a caption.
+     *
+     * Goes through [turnMutex] like any other turn, but not through
+     * [processUtterance] — there is no recording, so nothing to run STT on.
+     */
+    fun sendPendingImage() {
+        val pending = pendingImage ?: return
+        pendingImage = null
+        _state.update { it.copy(pendingImageLabel = null) }
+        appendLine(Speaker.USER, "[photo: ${pending.label}]")
+        scope.launch {
+            turnMutex.withLock { runTurnCore(DEFAULT_IMAGE_CAPTION, listOf(pending.block)) }
+        }
+    }
+
+    // ── Step 8: Zepto sign-in (D-082 gap 1) ─────────────────────────────────
+
+    /** No-op if commerce is not live (see [commerceSignIn]'s doc) or a sign-in is already in flight. */
+    fun signInToCommerce() {
+        val signIn = commerceSignIn ?: return
+        scope.launch {
+            _state.update { it.copy(statusLine = "Opening your browser to sign in to Zepto…") }
+            signIn().fold(
+                onSuccess = {
+                    _state.update { it.copy(statusLine = "Signed in to Zepto.", commerceSignedIn = true) }
+                },
+                onFailure = { e ->
+                    log.warn("Zepto sign-in failed: {}", e.message)
+                    _state.update { it.copy(statusLine = "Zepto sign-in didn't complete: ${e.message}") }
+                },
+            )
+        }
+    }
+
     fun shutdown() {
         runCatching { playback.stop() }
         captureJob?.cancel()
@@ -348,6 +445,36 @@ class VoiceController(
             return
         }
 
+        // ── EC-Z14: speaking while an ORDER window is open revises the cart. ──
+        //
+        // Bypasses turnMutex for the same reason the ask_user path above does:
+        // the turn holding that lock is the one suspended inside
+        // ConfirmationGate.submit, and it is exactly the turn we are about to
+        // release. Waiting for the lock here would deadlock against the thing
+        // we are trying to unblock.
+        //
+        // Only ORDER_PLACE. An email or calendar proposal has editable fields
+        // in the window itself, so speech has nothing to add there and would
+        // just be an ambiguous second way to do the same thing; a cart's
+        // contents live on the server and cannot be edited in the window at
+        // all, which is what makes this the only route (see OrderProposal).
+        val openGate = confirmationGate.state.value
+        if (openGate != null && openGate.proposal.kind == LedgerKind.ORDER_PLACE) {
+            setMicState(MicState.THINKING)
+            val transcript = stt.transcribe(utterance.id, utterance.wavPath, AudioFormatSpec.CAPTURE)
+            sessions.commit(rec, utterance, transcript)
+            if (transcript.isUsable) {
+                appendLine(Speaker.USER, transcript.text)
+                // The words go through verbatim. "Make it two, not four" only
+                // survives if the numbers do, so nothing paraphrases here.
+                confirmationGate.requestRevision(openGate.proposalId, transcript.text)
+            } else {
+                appendLine(Speaker.SYSTEM, sttOutcomeMessage(transcript))
+                setMicState(MicState.AWAITING_CONFIRMATION)
+            }
+            return
+        }
+
         turnMutex.withLock { runTurn(rec, utterance) }
     }
 
@@ -359,6 +486,10 @@ class VoiceController(
         if (!transcript.isUsable) {
             appendLine(Speaker.SYSTEM, sttOutcomeMessage(transcript))
             speak(prompts.emptyTranscriptFallback())
+            // Step 8: a pending photo is NOT dropped on a failed transcript -
+            // the user can hold to talk again, or press "send without
+            // caption". It only leaves via a turn that actually consumes it,
+            // or an explicit clearPendingImage().
             return
         }
 
@@ -385,6 +516,38 @@ class VoiceController(
 
         appendLine(Speaker.USER, transcript.text)
 
+        // Step 8: a photo attached earlier rides along with the next real
+        // utterance, whatever it turns out to say. Consumed here - a caption
+        // that arrives, successfully, always claims the pending photo.
+        val image = pendingImage
+        if (image != null) {
+            pendingImage = null
+            _state.update { it.copy(pendingImageLabel = null) }
+        }
+
+        runTurnCore(
+            utteranceText = transcript.text,
+            images = image?.let { listOf(it.block) } ?: emptyList(),
+            // EC-C2/EC-C3: the recording's own start instant and zone, not
+            // call-time Instant.now() - this is what actually wires up
+            // Utterance.startedAt's own doc comment end to end (Step 5/6).
+            utteranceAt = utterance.startedAt,
+            zone = utterance.zoneId,
+        )
+    }
+
+    /**
+     * The shared tail of a turn: cost gate, [AgentLoop.run], bookkeeping,
+     * speak the reply. Factored out of [runTurn] so [sendPendingImage] — which
+     * has no recording, and therefore nothing to run STT on — can reach the
+     * same path without a fake [Utterance].
+     */
+    private suspend fun runTurnCore(
+        utteranceText: String,
+        images: List<LlmBlock.Image> = emptyList(),
+        utteranceAt: Instant = Instant.now(),
+        zone: ZoneId = ZoneId.systemDefault(),
+    ) {
         // ── EC-G2: checked before a new utterance starts, never mid-turn ──
         when (val v = costMeter.check()) {
             is CostMeter.Verdict.Blocked -> {
@@ -403,17 +566,15 @@ class VoiceController(
 
         cancellation.reset()
         val output = agentLoop.run(
-            utterance = transcript.text,
+            utterance = utteranceText,
             phase = conversationState.phase,
             history = store.historyFor(conversationState),
             conversationId = conversationState.conversationId,
             turnIndex = turnIndex,
             cancellation = cancellation,
-            // EC-C2/EC-C3: the recording's own start instant and zone, not
-            // call-time Instant.now() - this is what actually wires up
-            // Utterance.startedAt's own doc comment end to end (Step 5/6).
-            utteranceAt = utterance.startedAt,
-            zone = utterance.zoneId,
+            utteranceAt = utteranceAt,
+            zone = zone,
+            images = images,
         )
         val result = output.result
 
@@ -619,5 +780,16 @@ class VoiceController(
                 phase = conversationState.phase,
             )
         }
+    }
+
+    private companion object {
+        /**
+         * Stands in for a caption on [sendPendingImage]'s no-speech path. Not
+         * a prompt asking the model to guess — the Photos section of
+         * [SystemPrompt.system] is what actually tells it what to do with an
+         * attached image; this is just the text `AgentLoop.run` needs
+         * something in the `utterance` slot to log and persist.
+         */
+        const val DEFAULT_IMAGE_CAPTION = "(no caption — see the attached photo)"
     }
 }

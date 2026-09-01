@@ -16,7 +16,13 @@ import java.nio.file.Path
  */
 class ActionLedgerTest {
 
-    private fun ledger(dir: Path): ActionLedger = ActionLedger(AgentDb(dir.resolve("app.db")))
+    private val databases = TestDatabases()
+
+    @org.junit.jupiter.api.AfterEach
+    fun closeTrackedDatabases() = databases.closeAll()
+
+
+    private fun ledger(dir: Path): ActionLedger = ActionLedger(databases.open(dir))
 
     @Test
     fun `create starts a row at PROPOSED`(@TempDir dir: Path) {
@@ -112,11 +118,11 @@ class ActionLedgerTest {
     @Test
     fun `reconciliation survives a restart against the same file`(@TempDir dir: Path) {
         val file = dir.resolve("app.db")
-        val id = ActionLedger(AgentDb(file)).create(LedgerKind.EMAIL_SEND, "{}")
+        val id = ActionLedger(databases.openAt(file)).create(LedgerKind.EMAIL_SEND, "{}")
         // Simulate the app dying mid-send: a fresh AgentDb/ActionLedger, same file.
-        val reopened = ActionLedger(AgentDb(file))
+        val reopened = ActionLedger(databases.openAt(file))
         reopened.transition(id, LedgerState.EXECUTING)
-        val restarted = ActionLedger(AgentDb(file))
+        val restarted = ActionLedger(databases.openAt(file))
         val report = restarted.reconcileOnStartup()
         assertEquals(1, report.unknownCount)
         assertEquals(LedgerState.UNKNOWN, restarted.get(id)!!.state)

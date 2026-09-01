@@ -3,8 +3,10 @@ package com.secondbrain.agent
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
 import com.anthropic.errors.AnthropicServiceException
+import com.anthropic.models.messages.Base64ImageSource
 import com.anthropic.models.messages.CacheControlEphemeral
 import com.anthropic.models.messages.ContentBlockParam
+import com.anthropic.models.messages.ImageBlockParam
 import com.anthropic.models.messages.Message
 import com.anthropic.models.messages.MessageCreateParams
 import com.anthropic.models.messages.MessageParam
@@ -223,6 +225,20 @@ class ClaudeClient(
             )
         }
 
+        is LlmBlock.Image -> ContentBlockParam.ofImage(
+            ImageBlockParam.builder()
+                .source(
+                    ImageBlockParam.Source.ofBase64(
+                        Base64ImageSource.builder()
+                            .data(block.base64)
+                            .mediaType(sdkMediaType(block.mediaType))
+                            .build()
+                    )
+                )
+                .apply { if (cacheControl) cacheControl(CacheControlEphemeral.builder().build()) }
+                .build()
+        )
+
         is LlmBlock.ToolResult -> ContentBlockParam.ofToolResult(
             ToolResultBlockParam.builder()
                 .toolUseId(block.toolUseId)
@@ -412,6 +428,15 @@ class ClaudeClient(
                 u.totalPromptTokens,
             )
         }
+    }
+
+    /** `ImageIntake` (`:app`) only ever emits `"image/jpeg"`; the other three exist so a future intake path can use them without a port change. */
+    private fun sdkMediaType(wire: String): Base64ImageSource.MediaType = when (wire) {
+        "image/jpeg", "image/jpg" -> Base64ImageSource.MediaType.IMAGE_JPEG
+        "image/png" -> Base64ImageSource.MediaType.IMAGE_PNG
+        "image/gif" -> Base64ImageSource.MediaType.IMAGE_GIF
+        "image/webp" -> Base64ImageSource.MediaType.IMAGE_WEBP
+        else -> Base64ImageSource.MediaType.IMAGE_JPEG
     }
 
     private fun isRetryable(e: AnthropicServiceException): Boolean {

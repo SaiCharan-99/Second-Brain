@@ -7,10 +7,9 @@ import java.time.Instant
  * "`Proposal` (sealed: `EmailProposal`, `CalendarProposal`, `OrderProposal`),
  * `Resolution`, `FieldKind`."
  *
- * `OrderProposal` is deliberately not here yet. Zepto's real shape is unknown
- * until Step 7's blocking spikes run (D-009), and CLAUDE.md's working style is
- * explicit: "never design ahead of what is validated." Adding a speculative
- * third variant now is exactly that.
+ * [OrderProposal] joined them in Step 7, once S7.1/S7.2 had actually answered
+ * what Zepto's endpoint does (D-079) rather than being guessed at — which is
+ * why it was deliberately absent from this file until then.
  *
  * [Proposal.kind] reuses [LedgerKind] rather than a second, parallel
  * "ProposalKind" enum with the same two values — a proposal and its ledger row
@@ -88,3 +87,48 @@ data class CalendarProposal(
 ) : Proposal {
     override val kind: LedgerKind get() = LedgerKind.CALENDAR_CREATE
 }
+
+/**
+ * WF-4's final gate: the whole cart, as the *server* reports it, plus every
+ * failure that happened on the way there.
+ *
+ * ### Why this one is not editable the way the other two are
+ *
+ * [EmailProposal] and [CalendarProposal] are local payloads whose fields the
+ * window edits in place, and `ConfirmationGate.editField` is synchronous
+ * because that is all a local payload needs. A cart is not local — it lives on
+ * Zepto's server, and changing it is a network mutation that can be *rejected*
+ * (out of stock, quantity cap). A synchronous `editField` cannot express that,
+ * so [cart] carries no editable [ProposalField]s at all (EC-Z15).
+ *
+ * Revision happens the other way round instead: the user speaks, the gate
+ * resolves with `RevisionRequested`, the model edits the real cart with the
+ * autonomous cart tools, re-reads, and proposes again (EC-Z14). The window's
+ * only two buttons that end anything are Place order and Cancel — both clicks,
+ * per R9.
+ *
+ * @param cart server truth at the moment of proposing, never our accumulator (EC-Z6).
+ * @param failedItems EC-Z10: announced *before* the total, never buried after it.
+ * @param overCeiling EC-Z17: true when [Cart.total] exceeds the configured
+ *   order ceiling. Not a block — an extra, explicit acknowledgement, because
+ *   the failure it guards against ("twenty kilos of rice" misheard) produces a
+ *   perfectly valid cart that is simply not what anyone asked for.
+ */
+data class OrderProposal(
+    val cart: Cart,
+    val failedItems: List<FailedItem> = emptyList(),
+    val paymentMethod: String = "Cash on delivery",
+    val overCeiling: Boolean = false,
+    val ceiling: Money? = null,
+    /** True when this came from `FakeCommerceAdapter`. Rendered as a loud banner — never demo a fake unsaid. */
+    val isFake: Boolean = false,
+    override val speechSummary: String,
+) : Proposal {
+    override val kind: LedgerKind get() = LedgerKind.ORDER_PLACE
+}
+
+/** EC-Z2/EC-Z5/EC-Z10: something the user asked for that is not in the cart, and why. */
+data class FailedItem(
+    val requested: String,
+    val reason: String,
+)

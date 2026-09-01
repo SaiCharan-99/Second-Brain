@@ -24,6 +24,11 @@ object ConversationDigest {
                         append(roleLabel(message.role)).append(": ").append(block.text.trim()).append('\n')
                     }
                     is LlmBlock.ToolUse -> append("[used tool: ").append(block.name).append("]\n")
+                    // Step 8: noted, not rendered — the photo's bytes have no
+                    // place in a text digest, but "a photo was attached" is
+                    // meaning a summary should carry, unlike the mechanics
+                    // Thinking/ToolResult are dropped for below.
+                    is LlmBlock.Image -> append(roleLabel(message.role)).append(": [attached a photo]\n")
                     // Thinking and tool_result add mechanics, not meaning, to a
                     // digest meant for placement/linking context — see
                     // SystemPrompt.summarizeInstruction.
