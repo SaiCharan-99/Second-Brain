@@ -16,6 +16,12 @@ icu4j               = "77.1"
 # D-096: Stage 2's camera backend. Bundled pure-Java default driver - no
 # OpenCV, no separate native install on Windows.
 webcamCapture       = "0.3.12"
+# D-102: stock JDK ImageIO has no WebP decoder at all, so a downloaded
+# grocery-list photo saved as .webp (a very common case - Reddit, WhatsApp
+# Web, Chrome's own "save as webp" default) failed ImageIntake.encodeForVision
+# outright. TwelveMonkeys registers as a plain ImageIO SPI plugin - no code
+# change needed beyond the dependency. BSD-3-Clause, actively released.
+twelvemonkeysImageio = "3.12.0"
 # Official Anthropic SDK for the JVM. Kotlin uses the Java SDK. Supersedes
 # ARCHITECTURE.md section 7's "Ktor" for the Claude transport - see D-044.
 anthropic           = "2.59.0"
@@ -54,6 +60,7 @@ ktor-client-mock                = { module = "io.ktor:ktor-client-mock",        
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
 icu4j       = { module = "com.ibm.icu:icu4j",      version.ref = "icu4j" }
 webcam-capture = { module = "com.github.sarxos:webcam-capture", version.ref = "webcamCapture" }
+imageio-webp   = { module = "com.twelvemonkeys.imageio:imageio-webp", version.ref = "twelvemonkeysImageio" }
 anthropic   = { module = "com.anthropic:anthropic-java", version.ref = "anthropic" }
 
 slf4j-api        = { module = "org.slf4j:slf4j-api",         version.ref = "slf4j" }

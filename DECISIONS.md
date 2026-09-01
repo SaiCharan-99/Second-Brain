@@ -1575,3 +1575,15 @@ Separately: this machine's Gradle build was failing outright on every command, b
 **Uncertain:** Nothing about this fix specifically — it is narrow and now covered by a regression test asserting the exact failure mode (opens at READY, first `confirmExecute()` call succeeds). Worth noting as a process gap: this is the second time this session a real, user-facing bug was found only by a human clicking the actual button rather than by any amount of code reading or unit testing of the surrounding logic — `ConfirmationGate`'s own extensive test suite exercised email/calendar exhaustively and never once constructed an `OrderProposal`.
 
 **Files:** `agent/src/main/kotlin/com/secondbrain/agent/ConfirmationGate.kt`, `agent/src/test/kotlin/com/secondbrain/agent/ConfirmationGateTest.kt`.
+
+## D-102 — Fix: WebP images could not be attached at all — stock JDK `ImageIO` has no WebP decoder
+
+**Date:** 2026-09-01
+
+**Decided:** Added `com.twelvemonkeys.imageio:imageio-webp:3.12.0` (BSD-3-Clause) as a `runtimeOnly` dependency on `:app`. It registers itself as a plain `javax.imageio.ImageIO` SPI plugin — `ImageIntake.encodeForVision` still calls only `ImageIO.read()`, unchanged; no code in `:app` references a TwelveMonkeys class directly.
+
+**Why:** Reported live, traced from the running app's own log: attaching a downloaded grocery-list photo (`this-is-my-grocery-list-handwriting-....webp`, a real WebP file, confirmed via `file`: `VP8 encoding, 1551x2352`) failed with `Not a readable image` — `ImageIO.read()` returns `null` for any format with no registered decoder, and the stock JDK ships readers for JPEG/PNG/GIF/BMP/WBMP only, never WebP. This is a real, common case, not an edge case: WebP is Chrome's default "Save image as" format, and it's WhatsApp Web's and Reddit's default served format too — a photo saved from almost anywhere in a browser today has a real chance of landing as `.webp`. Confirmed fixed against the exact file that failed (a throwaway spike test, deleted immediately after it printed a successful decode - not something to keep as a permanent fixture, since it depended on a path outside the repo and the file itself is someone else's photo, not fabricated test data).
+
+**Uncertain:** No permanent regression test was added — `ImageIntakeTest.kt`'s own doc already draws the line at real file I/O being manual-only (matching `:app`'s CLAUDE.md testing bar), and a synthetic WebP fixture would need either a WebP encoder (not otherwise needed anywhere in this codebase) or committing a real downloaded photo to the repository, which wasn't done here out of the same privacy discipline used earlier this session for a live webcam capture. If TwelveMonkeys' own read path ever regresses, nothing here will catch it automatically.
+
+**Files:** `gradle/libs.versions.toml`, `app/build.gradle.kts`.

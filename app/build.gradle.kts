@@ -43,6 +43,10 @@ dependencies {
     implementation(compose.material3)
     // D-096: Stage 2's camera backend (WF-6 capture window).
     implementation(libs.webcam.capture)
+    // D-102: registers itself as a plain javax.imageio.ImageIO SPI plugin -
+    // ImageIntake.kt calls only ImageIO.read(), never a TwelveMonkeys class
+    // directly, so this only ever needs to be on the runtime classpath.
+    runtimeOnly(libs.imageio.webp)
     // No icon-font dependency. compose.materialIconsExtended is pinned to a
     // 1.7.3 snapshot that will not receive updates (a real warning, not a
     // guess - it printed on the first resolve). The design board's own
