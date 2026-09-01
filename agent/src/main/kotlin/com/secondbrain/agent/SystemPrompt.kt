@@ -40,8 +40,15 @@ class SystemPrompt(
      * This is where the date goes. It changes every minute, so in the system
      * prompt it would be a guaranteed cache miss; here it sits after the last
      * breakpoint and costs nothing.
+     *
+     * [zone] defaults to the instance's own (the machine's zone, effectively)
+     * but Step 6's `AgentLoop.run` passes the *utterance's* zone explicitly —
+     * EC-C3's "store the zone ID, never a fixed offset" applies to what the
+     * model is told just as much as to what `TimeResolver` computes, so a
+     * traveller dictating from a different zone than the one `SystemPrompt`
+     * was constructed with still gets an honest "current date and time" line.
      */
-    fun userTurn(utterance: String, now: Instant = Instant.now()): String = buildString {
+    fun userTurn(utterance: String, now: Instant = Instant.now(), zone: ZoneId = this.zone): String = buildString {
         append("Current date and time: ")
         append(dateFormat.format(now.atZone(zone)))
         append(" (")

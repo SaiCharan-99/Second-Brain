@@ -241,7 +241,11 @@ class ClaudeClient(
                 .or { block.thinking().map { LlmBlock.Thinking(it.thinking(), it.signature()) } }
                 .or {
                     block.toolUse().map {
-                        LlmBlock.ToolUse(it.id(), it.name(), it._input().toString())
+                        // Not `it._input().toString()` — see JsonBridge.toJsonText's
+                        // doc. That produced Java Map syntax ({query=Hitler}), not
+                        // JSON, and broke every retry and every later turn that
+                        // replayed this block back to the API.
+                        LlmBlock.ToolUse(it.id(), it.name(), JsonBridge.toJsonText(it._input()))
                     }
                 }
                 .orElse(null)

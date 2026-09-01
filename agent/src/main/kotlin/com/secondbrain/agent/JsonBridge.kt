@@ -1,6 +1,7 @@
 package com.secondbrain.agent
 
 import com.anthropic.core.JsonValue
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
 
@@ -47,8 +48,26 @@ internal object JsonBridge {
         return out
     }
 
-    /** `JsonValue` back to compact JSON text, for persistence and logging. */
-    fun toJsonText(value: JsonValue): String = value.toString()
+    /**
+     * `JsonValue` back to compact JSON text, for persistence and logging — and,
+     * critically, for replaying a `tool_use` block's input back to the API on
+     * the next iteration or a retry ([ClaudeClient.toLlmResponse]).
+     *
+     * `JsonValue.toString()` is NOT this: a `JsonValue` wrapping a live tool
+     * call's `input` is backed by a plain `Map`, and `Map.toString()` produces
+     * Java's `{key=value}` form, not JSON — no quotes, `=` instead of `:`. That
+     * text round-trips through [LlmBlock.ToolUse.inputJson] as a plain `String`
+     * with nothing to catch the shape, is handed to a tool for validation
+     * (caught there, non-fatally, as EC-A3's "invalid input" warning), and is
+     * then re-parsed here by [objectToJsonValues] on the next turn — where a
+     * Jackson `JsonParseException` on `{query=Hitler}`'s bare `q` was, until
+     * this fix, misread by [send]'s catch-all as a transport failure and
+     * retried three times against data that can never parse. `.convert(JsonNode)`
+     * asks the SDK's own Jackson binding for the value, which always
+     * serialises through a real `JsonNode` — the one representation in this
+     * class hierarchy whose `toString()` is actually JSON.
+     */
+    fun toJsonText(value: JsonValue): String = value.convert(JsonNode::class.java).toString()
 
     /** Reads a JSON string array. Used for a schema's `required` list. */
     fun stringArray(jsonText: String?): List<String> {
