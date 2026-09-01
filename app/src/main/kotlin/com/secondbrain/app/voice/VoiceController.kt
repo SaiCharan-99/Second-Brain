@@ -40,6 +40,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -877,7 +878,16 @@ class VoiceController(
         try {
             val marked = flow {
                 var first = true
-                primaryTts.synthesize(request).collect { chunk ->
+                // D-103: without buffer(1), sentence N+1's whole Gemini TTS
+                // call (measured live: 6-12s per sentence) does not even
+                // START until playback.play()'s blocking collect() has
+                // finished writing sentence N's audio to the line - so every
+                // sentence boundary become a multi-second silent gap while a
+                // fresh network call runs. buffer(1) runs this flow's
+                // producer (synthesizeOne) in its own coroutine, one item
+                // ahead of the consumer, so the next sentence is already
+                // synthesizing while the current one is still audible.
+                primaryTts.synthesize(request).buffer(1).collect { chunk ->
                     if (first) { first = false; cueJob.cancel() }
                     emit(chunk)
                 }
