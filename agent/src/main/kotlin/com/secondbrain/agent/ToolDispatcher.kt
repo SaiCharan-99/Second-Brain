@@ -25,6 +25,20 @@ import org.slf4j.LoggerFactory
  * block without a matching `tool_result` in the next request is a 400 from the
  * API, so dropping a result on the floor turns a recoverable tool error into a
  * dead conversation.
+ *
+ * ### GATED tools, since Step 5
+ *
+ * Through Step 3 this class special-cased `ToolClass.GATED` and returned a
+ * canned `awaiting_user_confirmation` result without ever calling the handler
+ * — a placeholder, since no gated tool existed yet. That branch is gone: a
+ * gated handler now runs exactly like an autonomous one. R2 ("gated tools
+ * never execute from a model call") does not depend on interception here —
+ * it depends on what a gated handler is *written* to do, which is build a
+ * `Proposal` and call `ConfirmationGate.submit(...)`, suspending until a human
+ * resolves it. See `ConfirmationGate`'s own doc for the full argument. This
+ * class keeps its two structural guarantees regardless of class: the
+ * forbidden-tool-name check at registration (`ToolRegistry.build`) and
+ * validate-before-dispatch below.
  */
 class ToolDispatcher(
     private val registry: ToolRegistry,
@@ -39,8 +53,6 @@ class ToolDispatcher(
         val event: ToolEvent,
         /** True when the model needs to correct itself: unknown tool or bad input. */
         val needsSelfCorrection: Boolean,
-        /** Set when a GATED tool was requested. Step 5 suspends on this. */
-        val gatedToolName: String? = null,
     )
 
     suspend fun dispatch(call: LlmBlock.ToolUse): Dispatched {
@@ -76,36 +88,7 @@ class ToolDispatcher(
             )
         }
 
-        // ── R2: a gated tool never executes from a model call ────────────────
-        if (spec.toolClass == ToolClass.GATED) {
-            // Step 3 registers no gated tools, so this is unreachable today. It is
-            // here rather than at Step 5 because the invariant belongs with the
-            // dispatcher: there must be no code path where a GATED handler runs
-            // because the model asked. ConfirmationGate resolves these in Step 5.
-            log.info("Gated tool '{}' requested; suspending rather than executing (R2).", call.name)
-            return Dispatched(
-                result = LlmBlock.ToolResult(
-                    toolUseId = call.id,
-                    content = buildJsonObject {
-                        put("status", "awaiting_user_confirmation")
-                        put("tool", call.name)
-                    }.toString(),
-                    isError = false,
-                ),
-                event = ToolEvent(
-                    name = call.name,
-                    toolClass = ToolClass.GATED,
-                    inputJson = call.inputJson,
-                    resultJson = "{\"status\":\"awaiting_user_confirmation\"}",
-                    isError = false,
-                    durationMs = System.currentTimeMillis() - started,
-                ),
-                needsSelfCorrection = false,
-                gatedToolName = call.name,
-            )
-        }
-
-        // ── execute ──────────────────────────────────────────────────────────
+        // ── execute (AUTONOMOUS and GATED alike — see this class's doc) ──────
         return try {
             val outcome = spec.handler(call.inputJson)
             Dispatched(

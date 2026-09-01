@@ -25,6 +25,7 @@ class ConfigLoaderTest {
         model = "kokoro"
         voice = "af_heart"
         base_url = "https://tts.example.com"
+        api_key = "AIza-tts-test-key"
     """.trimIndent()
 
     private fun write(dir: Path, content: String): Path {
@@ -98,6 +99,7 @@ class ConfigLoaderTest {
             env = mapOf(
                 "SECONDBRAIN_STT_MODEL" to "m",
                 "SECONDBRAIN_STT_API_KEY" to "k",
+                "SECONDBRAIN_TTS_API_KEY" to "k2",
                 "SECONDBRAIN_TTS_MODEL" to "kokoro",
                 "SECONDBRAIN_TTS_VOICE" to "af",
                 "SECONDBRAIN_TTS_BASE_URL" to "https://x",
@@ -106,6 +108,7 @@ class ConfigLoaderTest {
         )
         assertEquals("m", config.stt.model)
         assertEquals("https://x", config.tts.baseUrl)
+        assertEquals("k2", config.tts.apiKey)
     }
 
     @Test
@@ -156,6 +159,7 @@ class ConfigLoaderTest {
             model = "kokoro"
             voice = "af_heart"
             base_url = "https://tts.example.com"
+            api_key = "AIza-tts-test-key"
         """.trimIndent()
 
         val config = ConfigLoader.load(write(dir, content), env = emptyMap(), userHome = dir.toString())
@@ -208,15 +212,51 @@ class ConfigLoaderTest {
         val safe = config.redacted()
 
         assertEquals(AppConfig.MASK, safe.stt.apiKey)
+        assertEquals(AppConfig.MASK, safe.tts.apiKey)
         assertEquals("gemini-2.5-flash", safe.stt.model)
         assertEquals("https://tts.example.com", safe.tts.baseUrl)
-        assertFalse(safe.toString().contains("AIza-test-key-value"), "the key leaked through toString()")
+        assertFalse(safe.toString().contains("AIza-test-key-value"), "the stt key leaked through toString()")
+        assertFalse(safe.toString().contains("AIza-tts-test-key"), "the tts key leaked through toString()")
     }
 
     @Test
-    fun `an optional tts api key stays null rather than becoming the mask`(@TempDir dir: Path) {
-        val config = ConfigLoader.load(write(dir, minimal), env = emptyMap(), userHome = dir.toString())
-        assertEquals(null, config.tts.apiKey)
-        assertEquals(null, config.redacted().tts.apiKey)
+    @DisplayName("D-065: tts.api_key is required now — Gemini TTS genuinely needs one, unlike a self-hosted Kokoro")
+    fun `a missing tts api key fails fast by name`(@TempDir dir: Path) {
+        val noTtsKey = """
+            [stt]
+            model = "gemini-2.5-flash"
+            api_key = "AIza-test-key-value"
+
+            [tts]
+            model = "kokoro"
+            voice = "af_heart"
+            base_url = "https://tts.example.com"
+        """.trimIndent()
+
+        val e = assertThrows(ConfigException::class.java) {
+            ConfigLoader.load(write(dir, noTtsKey), env = emptyMap(), userHome = dir.toString())
+        }
+        assertTrue(e.message!!.contains("tts.api_key"), e.message)
+        assertTrue(e.message!!.contains("SECONDBRAIN_TTS_API_KEY"), e.message)
+    }
+
+    @Test
+    @DisplayName("D-065: an absent [tts] section still loads, defaulting to Gemini TTS")
+    fun `tts defaults to Gemini when the section is entirely absent`(@TempDir dir: Path) {
+        val sttOnly = """
+            [stt]
+            model = "gemini-3.5-transcribe"
+            api_key = "AIza-test-key-value"
+        """.trimIndent()
+
+        val config = ConfigLoader.load(
+            write(dir, sttOnly),
+            env = mapOf("SECONDBRAIN_TTS_API_KEY" to "AIza-tts-test-key"),
+            userHome = dir.toString(),
+        )
+        assertEquals("gemini-3.1-flash-tts-preview", config.tts.model)
+        assertEquals("Kore", config.tts.voice)
+        assertEquals("https://generativelanguage.googleapis.com", config.tts.baseUrl)
+        assertEquals("gemini-3.5-transcribe", config.stt.model)
     }
 }

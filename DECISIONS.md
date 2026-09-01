@@ -676,6 +676,170 @@ Accepted cost: Jackson and OkHttp now sit alongside Ktor and kotlinx-serializati
 
 ---
 
+## D-058 — Compose Multiplatform Desktop wiring: `google()` is required, the `application` plugin is gone, no icon-font dependency
+**Date:** 2026-09-01
+
+**Decided:** `:app` applies `org.jetbrains.compose` 1.11.1 and `org.jetbrains.kotlin.plugin.compose` (pinned to the Kotlin version, 2.4.10) instead of the plain `application` plugin. `settings.gradle.kts`'s `dependencyResolutionManagement` gains `google()` alongside `mavenCentral()`. There is no Material icon dependency; the handful of glyphs the UI needs (a tree chevron, a nav-rail dot) are hand-drawn.
+
+**Why:** Measured, not assumed, against the real Compose Multiplatform 1.11.1 artifacts. `:app:compileKotlin` failed to resolve `androidx.collection:collection`, `androidx.compose.runtime:runtime`, `androidx.annotation:annotation`, `androidx.lifecycle:*` and `androidx.savedstate:*` — all real transitive dependencies of `compose.desktop.currentOs`/`compose.material3` that are published only to Google's Maven repository, never Maven Central, even though nothing here targets Android. `mavenCentral()` alone is not enough for a "desktop-only" Compose Multiplatform app.
+
+The plain `application` plugin and `compose.desktop.application {}` each register a task literally named `run`; applying both fails immediately. Compose Desktop's own block supplies `mainClass` and an equivalent `:app:run`, so `SETUP_GUIDE.md`'s `./gradlew.bat :app:run` keeps working, and native packaging (`packageMsi`) is the right distribution shape for a GUI app — the old plugin's `distTar`/`distZip`/`startScripts` were dead weight the moment there was a real window instead of a stub `println`. `capture` (the Step 3 harness task) does not depend on `application` at all — `sourceSets` comes from the Kotlin plugin — so it is unaffected.
+
+`compose.materialIconsExtended` prints its own warning on first resolve: it is pinned to a 1.7.3 snapshot that "will not receive updates." Given the design board's own brief — "light, quiet, desktop-native: system type, hairline rules, no brand color beyond one system blue" — a few Canvas-drawn glyphs cost nothing and owe no version anyone has to track later. `compose.material3` is used via its deprecated-but-functional accessor (`'material3: String' is deprecated. Specify dependency directly`); accepted rather than chased, since the warning does not fail the build and pinning the artifact coordinate by hand trades one uncertainty for another for no behavioural gain.
+
+The composition root also needs `io.ktor.client.HttpClient` itself, to own closing the two clients `:voice`'s `HttpClients.create` returns — `:voice` declares Ktor as `implementation`, which does not leak the type to `:app`'s compile classpath, so `:app` takes the same `libs.bundles.ktor.client` dependency directly.
+
+**Uncertain:** Whether `compose.material3`'s deprecation warning becomes a hard removal in a later Compose Multiplatform release, at which point the dependency declaration needs the explicit coordinate the warning names. Native packaging (`packageMsi`) is wired but unexercised — nobody has run it yet.
+
+**Files:** `settings.gradle.kts`, `gradle/libs.versions.toml`, `build.gradle.kts`, `app/build.gradle.kts`.
+
+---
+
+## D-059 — `Vault.changes`: the FileWatcher → UI signal ARCHITECTURE.md's Step 4 asks for
+**Date:** 2026-09-01
+
+**Decided:** `Vault` exposes `changes: SharedFlow<Unit>`, ticking once after every mutation — our own writes (from `runWrite`, covering `writeNote`/`appendNote`/`moveNote`/`createStub`) and every change the `FileWatcher` collector picks up (`Upserted`, `Deleted`, and a post-`Overflowed`-rescan). Content-free by design: no payload describing *what* changed.
+
+**Why:** ARCHITECTURE.md §7 Step 4 names this exact wiring — "FileWatcher → UI state flow, so a capture on screen 1 appears on screen 2 with no restart" — without saying how. `:app` already learns about its own agent-driven writes synchronously, from `AgentTurnResult.touchedNotes`, so the gap this actually closes is EC-N10: a note edited in an external editor while the dashboard is open, which has no other signal reaching `:app` at all. A payload would have to be kept in lock-step with every call site touching the index, and a stale one is worse than none; the UI already knows how to re-query whatever it currently has selected, so a bare tick is the whole contract. `extraBufferCapacity` plus `DROP_OLDEST` means a burst — a multi-file external edit, an `OVERFLOW` rescan — coalesces into "something changed, look again" instead of the vault's own write path ever blocking on a slow UI collector.
+
+**Uncertain:** Nothing about the mechanism. Whether ticking on *every* mutation (including our own, which `:app` already knows about by other means) causes a visibly redundant extra query at real vault sizes is unmeasured — cheap at the "few thousand notes" scale D-042 already accepted, and simpler than trying to distinguish "a change the caller already knows about" from "a change it doesn't."
+
+**Files:** `vault/src/main/kotlin/com/secondbrain/vault/Vault.kt`.
+
+---
+
+## D-060 — Speech normalisation happens in `:app`, never in `:agent`; `AgentTurnResult.spokenText`'s doc comment was wrong
+**Date:** 2026-09-01
+
+**Decided:** `AgentTurnResult.spokenText` is the model's raw text reply — not normalised, not capped for speech. `VoiceController.speak()` runs it through `SpeechNormalizer.normalize` and `capForSpeech` before every synthesis call, the same way `VoiceHarness.speak()` already did for its own text in Step 1.
+
+**Why:** Step 3's `AgentTurnResult` KDoc claimed the field was "already normalised and capped for speech (EC-T1, EC-T2)" — which cannot be true: `SpeechNormalizer` lives in `:voice`, and `:agent` is not permitted to depend on `:voice` (§1). The claim was aspirational or simply wrong; either way, Step 4 is the first place both modules are visible to the same caller, so it is also the first place the mistake was reachable. Left uncorrected, the natural reading would have been "skip normalising, it's already done," which would have shipped raw Markdown straight to Kokoro.
+
+**Uncertain:** Nothing.
+
+**Files:** `model/src/main/kotlin/com/secondbrain/model/Agent.kt`, `app/src/main/kotlin/com/secondbrain/app/voice/VoiceController.kt`.
+
+---
+
+## D-061 — The rolling summariser is a real Claude call now; a text digest, never a replay of raw blocks
+**Date:** 2026-09-01
+
+**Decided:** `VoiceController.summarise` — the `summariser` `ConversationStore.advance` has always accepted — is a one-shot `LlmPort.send` call, `thinkingEnabled = false`, logged to `CostMeter.Service.CLAUDE_SUMMARY`. Its input is `ConversationDigest.render(dropped)`: plain `"User: ..."` / `"Assistant: ..."` / `"[used tool: X]"` lines, never the dropped `LlmMessage`s themselves.
+
+**Why:** D-047 named this ("a real summariser is a Claude call") and Step 3's harness deliberately supplied a no-op instead, "kept out of the harness so summary spend does not contaminate the per-capture figure" — a harness reason that does not apply to the live app, where a session genuinely exceeding `context_window_turns` (8) is an expected, not exceptional, outcome of normal use. Replaying the dropped messages verbatim into a fresh one-shot request is unsafe regardless: a `tool_result` without the `tool_use` it answers, in the *same* request, is a 400 from the API — `AgentLoop`'s own documented finding — and the turns falling out of the window have no reason to land on a clean user/assistant boundary. Rendering to text sidesteps the pairing requirement entirely and, as a side effect, is legible if it ever needs debugging.
+
+**Uncertain:** Whether 300 `maxTokens` is enough headroom for "one short paragraph" in practice — unmeasured, no summary call has run against the real API yet (Step 3's own credential gap, D-056, is still open). The system prompt for the summary call ("You summarise conversation excerpts...") is a fixed one-liner rather than anything from `SystemPrompt`'s frozen-prefix machinery, since a one-shot request has its own prefix and will not see a cache hit regardless — deliberately not cached, so a future reader does not mistake the absence of a cache breakpoint here for an oversight.
+
+**Files:** `app/src/main/kotlin/com/secondbrain/app/voice/VoiceController.kt`, `ConversationDigest.kt`, `agent/src/main/kotlin/com/secondbrain/agent/SystemPrompt.kt`.
+
+---
+
+## D-062 — `ask_user` actually speaks and listens now; no timeout; a mutex keeps it from deadlocking itself
+**Date:** 2026-09-01
+
+**Decided:** The `askUser` lambda `VaultTools` is built with, in `Main.kt`, calls `VoiceController.handleAskUser`, which speaks the question, then suspends on a `CompletableDeferred<VaultTools.AskResult>` until the user's *next* full talk-press-and-release cycle resolves it — with no timeout. `VoiceController.turnMutex` serialises top-level turn processing (STT through the agent loop and its bookkeeping) but `handleAskUser`'s answer-delivery path deliberately never takes it, since the turn holding the lock is the one waiting on this call.
+
+**Why:** D-055 built `AskResult.Answered` / `NoAnswer` in Step 3 but left the wait itself to "the caller supplying the handler," explicitly because "what the right wait is has not been measured." Step 4 is that caller. Inventing a timeout number now would be exactly the kind of silent guess CLAUDE.md's working style says not to make — waiting indefinitely for a person to answer a question the machine itself just asked is the honest version of "unmeasured," not a gap.
+
+The mutex exists because of D-048: talking again while THINKING cancels the in-flight turn *and* immediately starts a new recording, so a cancelled turn's tail (`ConversationStore.recordTurn`/`advance`, `CostMeter.record`) can genuinely still be running when the replacement utterance's own processing begins — both would otherwise be free to mutate `conversationState`/`turnIndex` at once. Taking that same lock inside `handleAskUser` would deadlock: the mutex is only ever released by the turn that is, at that moment, suspended waiting for `handleAskUser` to return. EC-V1's gate check runs before either branch and never resolves a pending answer on a discard, so a fumbled talk-press while answering is retried, not silently counted as `NoAnswer`.
+
+**Uncertain:** Whether a genuinely unbounded wait is the right call once this sees real usage — nothing here has been exercised against the live API (same credential gap as D-061). If it turns out wrong, the fix is additive (a configured timeout in `AgentConfig`), not a redesign.
+
+**Files:** `app/src/main/kotlin/com/secondbrain/app/voice/VoiceController.kt`, `app/src/main/kotlin/com/secondbrain/app/Main.kt`.
+
+---
+
+## D-063 — EC-G2's spoken cost-ceiling confirmation is a narrow keyword gate, and each "yes" buys one more ceiling's worth
+**Date:** 2026-09-01
+
+**Decided:** `CostConfirmation.parse` matches a fixed allow-list of yes/no phrases against one utterance. On `CostMeter.Verdict.Blocked`, `VoiceController` speaks the balance, sets `awaitingCostConfirmation`, and does *not* process that utterance further — the request itself is not retried automatically; the user repeats it after confirming. A "yes" calls `CostMeter.raiseCeiling(appConfig.agent.sessionUsdCeiling)` — the ceiling amount itself, so each confirmation extends the session by one more ceiling's worth.
+
+**Why:** D-047 requires this to be spoken, not a click — "continuing to spend money is neither [irreversible nor a verbatim field], so a spoken yes keeps the count at two rather than inventing a third" R9 exception. That leaves EC-V8's "never route on keyword matching, Claude classifies intent" looking like it forbids exactly this, until you notice what EC-V8 is actually about: telling *different* actions apart ("send" / "spend"), which needs a classifier because guessing wrong is expensive and unbounded. Here there is no Claude turn to ask *through* — the whole point of the gate is that the loop must not resume without spending more money, so routing "should I keep spending money?" through another paid model call is circular. A closed allow-list for one bounded binary question is the same shape as a "press 1 to confirm" voice menu, not the open-ended routing EC-V8 is about.
+
+The extend-by-one-ceiling rule is a guess, and a documented one rather than a silent one. The alternative — lifting the ceiling once and never re-checking — defeats the ceiling's purpose after a single confirmation; re-extending by the same increment each time keeps the number meaningful without inventing a second config key nobody has asked for yet.
+
+**Uncertain:** The extend-by-one-ceiling increment is unvalidated against real usage, same footing as D-007's Folder Guard threshold — a guess to be tuned once someone actually hits it. The default `session_usd_ceiling` ($2.00) makes this rare enough that it may simply never fire in normal use before the number gets revisited.
+
+**Files:** `app/src/main/kotlin/com/secondbrain/app/voice/CostConfirmation.kt`, `VoiceController.kt`.
+
+---
+
+## D-064 — The vault dashboard: a hand-rolled Markdown renderer, `LinkAnnotation` over the deprecated `ClickableText`, and "All notes" as the default view
+**Date:** 2026-09-01
+
+**Decided:** `NoteMarkdown` renders a note body to an `AnnotatedString` with a small hand-written inline scanner (headings, bold, italic, inline code, `[[wikilinks]]`) rather than a Markdown parser dependency. `[[wikilinks]]` carry a `LinkAnnotation.Clickable` with an embedded `LinkInteractionListener`, not the offset-lookup `ClickableText` API. A dangling link is distinguished from a resolved one by colour (`AppColors.Dangling` vs `AppColors.Blue`), not the design board's literal dashed underline. The list pane defaults to a pinned "All notes" pseudo-folder (`selectedFolder == null`), sorted by `Instant.parse(updatedAt)` descending, rather than nothing selected.
+
+**Why:** A note body is `NoteRenderer` output or a person typing by hand — the same small, closed set of Markdown a transcript could plausibly contain — so this is the same call `SpeechNormalizer` already made for itself: "a parser would be correct and slow to write... a sequence of targeted rewrites is what the job actually needs." `ClickableText` prints its own deprecation warning on first use, steering explicitly at `LinkAnnotation` — worth taking on a fresh Step 4 UI rather than shipping a known-deprecated API on day one, especially with a real compiler available to verify the replacement immediately. Compose's `TextDecoration` has no dashed variant for inline spans; colour carries the "visually distinct" requirement WF-5 actually asks for, even though it is not the exact stroke the mockup shows.
+
+"All notes" as the default, rather than an empty selection, is what makes the Step 4 exit criterion — "capture a note by voice; it appears in the dashboard within 2 seconds" — actually *visible* without the reviewer first having to click into the right folder: a new or updated note sorts to the top of the unfiltered view the moment `Vault.changes` ticks. Sorting parses to `Instant` rather than comparing `updatedAt` strings lexicographically: `Instant.toString()` omits trailing zero fractional digits, so two timestamps in the same second can compare out of order as plain strings — a real, if narrow, correctness gap, not a hypothetical one, and the fix costs nothing.
+
+**Uncertain:** Whether the hand-rolled renderer's bold/italic overlap handling (`**bold**` next to `*italic*` in one line) is fully correct on adversarial input is not exhaustively tested — reasonable for model-generated and hand-typed prose, untested against deliberately hostile Markdown, which nothing in this vault has a reason to contain.
+
+**Files:** `app/src/main/kotlin/com/secondbrain/app/vault/NoteMarkdown.kt`, `VaultBrowserController.kt`, `VaultScreen.kt`, `TreeFlatten.kt`.
+
+---
+
+## D-065 — STT moves to `gemini-3.5-transcribe`, TTS moves to Gemini native audio; both measured live before being wired in
+**Date:** 2026-09-01
+
+**Decided:** `stt.model` becomes `gemini-3.5-transcribe`, a dedicated speech-to-text model, superseding the general-chat-model assumption (`gemini-2.5-flash`) §7 Step 1 shipped with. `GeminiStt.extractText` now reads `parts[].audioTranscription.text` (falling back to `parts[].text`). TTS moves off Kokoro to `gemini-3.1-flash-tts-preview` — a new `GeminiTts` (`:voice`) implementing `TtsPort` against `generateContent` with `responseModalities: ["AUDIO"]`. `KokoroTts` is untouched and still compiles; `TtsConfig.model`/`voice`/`baseUrl` all gained Gemini defaults, so a config with no `[tts]` section at all now loads, and `tts.api_key` joined `ConfigLoader`'s required list — Gemini genuinely needs one, where a self-hosted Kokoro deployment often didn't.
+
+**Why:** Udit supplied a live Gemini key and named both models by name. Rather than trust a training-cutoff memory of what those model IDs' APIs look like — both post-date this session's knowledge — every shape below was measured against the real endpoint first, the same discipline D-013's noise-floor probe and S1.2's Kokoro-contract framing already establish for this codebase:
+
+```
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent
+  -> 200, candidates[0].content.parts[0].inlineData: {"mimeType":"audio/l16; rate=24000; channels=1","data":"<base64 PCM>"}
+
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:generateContent
+  (inline_data audio, the SAME request shape GeminiStt already used)
+  -> 200, candidates[0].content.parts[0].audioTranscription.text: "Saved to inbox as a new note."
+  (round-tripped: that WAV was the TTS call's own output, decoded from its base64 PCM)
+```
+
+Two findings neither vendor doc page surfaced on its own. First, the transcription model's response nests the text under a structured `audioTranscription` part, not the `text` field every other Gemini response uses — `GeminiStt.extractText` would have silently returned `null` (read as an empty transcript) against a model that had, in fact, transcribed correctly. Second, official docs describe `gemini-3.5-transcribe` as needing the Files API and a different `/v1beta/interactions` endpoint; measured against the actual API, the existing inline-base64 `generateContent` shape GeminiStt already used works unmodified — simpler than the documented path, and confirmed rather than assumed to be a safe simplification specifically because a real 200 came back with a correct transcript.
+
+`TtsConfig` gaining defaults (rather than requiring the fields again for a second provider) mirrors `stt.base_url`'s own existing pattern once Gemini is the primary TTS provider too. `KokoroTts` is deliberately not deleted — ports exist so a provider is swappable, and D-065 is exactly the swap that machinery was built for; someone pointing `tts.base_url` at a self-hosted endpoint still has a working implementation to fall back to.
+
+**Uncertain:** Whether `gemini-3.5-transcribe`'s "smart" cleanup mode (disfluency/filler-word removal, per its own product docs) can be disabled from the `generateContent` path this file uses — only the `/v1beta/interactions` endpoint's documented `transcription_config.mode: "verbatim"` was confirmed to exist, and that endpoint was not the one wired in. EC-V5 requires verbatim output; the existing prompt's explicit anti-cleanup instructions are kept as the defence, unverified against a genuinely disfluent, code-switched utterance (only a short, clean English test phrase was tested end-to-end). Cost tracking for STT/TTS calls was never wired up even in Step 1 — `CostMeter.Service.GEMINI`/`KOKORO` exist but nothing calls `record()` with them, a pre-existing gap this entry does not close. Gemini TTS's `speed` and multi-language/multi-speaker behaviour are unexercised. `KokoroTts` itself remains exactly as unconfirmed as D-016 already recorded it.
+
+**Files:** `voice/src/main/kotlin/com/secondbrain/voice/GeminiStt.kt`, `GeminiTts.kt` (new), `voice/src/test/kotlin/com/secondbrain/voice/GeminiTtsTest.kt` (new), `model/src/main/kotlin/com/secondbrain/model/AppConfig.kt`, `ConfigLoader.kt`, `model/src/test/kotlin/com/secondbrain/model/ConfigLoaderTest.kt`, `app/src/main/kotlin/com/secondbrain/app/Main.kt`, `config.example.toml`.
+
+---
+
+## D-066 — `agent.workspace_id`, and `agent.effort` becomes provider-omittable
+**Date:** 2026-09-01
+
+**Decided:** `AgentConfig` gains `workspaceId: String? = null`; when set, `ClaudeClient` sends it as the `anthropic-workspace-id` header. `AgentLoop.request()` now omits `output_config.effort` entirely when `config.effort` is blank, rather than sending `LlmRequest.effort` unconditionally.
+
+**Why:** Measured live, in order. First attempt at wiring Udit's Anthropic key failed every request with `anthropic-workspace-id is required when authenticating with an identity-linked API key` — a personal/service-account key scoped to more than one workspace, distinct from the plain single-workspace keys this client was built against. No endpoint reachable with that key could list workspace IDs to self-discover one (the Admin API workspaces list returned a 403 `permission_error` for this key specifically), so it has to come from the Console and be config, not something the app can infer.
+
+Separately, switching the target model toward Claude Haiku 4.5 (see the "Uncertain" note below — never completed) surfaced that `effort` is Opus/Sonnet/Fable-tier only and is rejected outright on Haiku. `AgentConfig.effort` had no way to express "omit this" — it was a plain non-null `String` always forwarded. Blank-means-omit reuses the type rather than making the field nullable, since `ConfigLoader`'s flat TOML reader has no natural way to distinguish "key absent" from "key present with an empty value" once a Kotlin default exists either way, and "absent" already means "use the default," which is the opposite of what an omit signal needs to mean here.
+
+**Uncertain:** The Haiku migration itself was never finished — mid-troubleshooting, Anthropic stopped accepting payment on the account entirely (see D-067), and the effort session moved to DeepSeek instead. The blank-omits-effort mechanism is real and now in the codebase, but nothing has exercised it against a live Haiku response — only against DeepSeek's endpoint, where `effort` support is itself unconfirmed (also left blank there, for the same reason).
+
+**Files:** `model/src/main/kotlin/com/secondbrain/model/Agent.kt`, `agent/src/main/kotlin/com/secondbrain/agent/AgentLoop.kt`, `ClaudeClient.kt`.
+
+---
+
+## D-067 — Reasoning moves to DeepSeek, via `ClaudeClient` pointed at a different `base_url`; no new `LlmPort` implementation
+**Date:** 2026-09-01
+
+**Decided:** `AgentConfig.baseUrl: String? = null` — blank keeps the Anthropic SDK's own default; set to `https://api.deepseek.com/anthropic` and `ClaudeClient` runs unmodified against DeepSeek's Anthropic-wire-compatible endpoint instead of writing a second `LlmPort` implementation. `model = "deepseek-v4-pro"` (DeepSeek's own model ID, not the Claude-name auto-mapping DeepSeek also offers — explicit beats an implicit table that could change, per EC-G3's reasoning applied to a second provider). `cache_enabled` and `prewarm_cache` set to `false` in Udit's config, and pricing updated to DeepSeek's rates, none of which the code enforces automatically.
+
+**Why:** Udit asked first for "Gemini 3.5" reasoning; checked before promising anything — Gemini 3.5 Pro does not exist yet as of this session (delayed since May, no model ID, no public API, per live search). Real options were `gemini-3.1-pro-preview`, or building nothing and fixing Anthropic's billing instead — recommended the latter, since the blocker at that point (an identity-linked key needing a workspace header) was already solved and the remaining problem was a credit-balance top-up, not an integration problem. Udit then reported Anthropic outright refusing the payment method — a harder blocker than credits — and supplied a DeepSeek key instead.
+
+Before writing a new client: DeepSeek documents an Anthropic-compatible endpoint (`api-docs.deepseek.com/guides/anthropic_api/`) built specifically so "existing Anthropic client code" works against it unmodified. Measured against the real endpoint before trusting the docs: a request with the wrong URL, key shape, or model name fails before it reaches billing; this request reached `HTTP 402 Insufficient Balance` — meaning the URL, the `x-api-key` auth (same header name Anthropic uses), and the model string were all accepted, and only account funding is blocking a full response. Ran the actual `:app:capture` harness against the real `config.toml` immediately after — vault opens, tool registry builds, the agent loop dispatches, and the request reaches DeepSeek and fails with the identical 402, end to end, not just via a bare curl call.
+
+Documented, not measured directly (the account has no balance to complete a real turn with): DeepSeek ignores `cache_control` rather than rejecting it (prompt caching is a silent no-op, not an error — `cache_enabled` set false in config so `CostMeter`'s "cache read 0 tokens" warning doesn't fire constantly and misleadingly on every real turn) and ignores `budget_tokens` (irrelevant — this client never sends one, per D-049). Tool use and parallel tool calls are documented as supported; `output_config.effort` support is not documented either way, so it stays blank (D-066) rather than guessed.
+
+Not a new `LlmPort` implementation, on purpose: the entire cost of building `GeminiClient` or `DeepSeekClient` from scratch — new tool-use mapping, new stop-reason mapping, new thinking-block handling, all newly unverified — is exactly what D-044 chose the official SDK to avoid in the first place. `ClaudeClient`'s own doc comment already says the class depends on the *SDK*, not literally on Claude; this proves that was true, not just a phrasing choice.
+
+**Uncertain:** No real turn has completed against DeepSeek — the account has zero balance, same class of blocker as Anthropic's, just further along (past auth and request validation, not past billing). `output_config.effort` support is genuinely unknown. Pricing is off-peak only; DeepSeek's peak-hours multiplier (roughly 3x, 01:00-04:00 and 06:00-10:00 UTC) has no representation in `AgentConfig`'s single-price-per-token-class model, so a capture made during peak hours will under-report cost by that factor — accepted rather than modelled, since `:agent`'s pricing shape has no time-of-day axis anywhere and adding one for a single provider's promotional pricing structure is more machinery than this is worth right now. Whether adaptive thinking specifically (versus thinking in general) is what DeepSeek's "supported" claim covers is documented, not independently confirmed.
+
+**Files:** `model/src/main/kotlin/com/secondbrain/model/Agent.kt`, `agent/src/main/kotlin/com/secondbrain/agent/ClaudeClient.kt`, `config.example.toml`.
+
+---
+
 ## D-045 — `app.db` has two module owners, coordinating through `schema_migrations`
 **Date:** 2026-09-01
 
@@ -890,3 +1054,155 @@ The constancy is a cache requirement, not style. Any per-request byte in the sys
 **Uncertain:** Placement quality is entirely unvalidated. The 20-capture gate exists to measure whether these instructions actually produce ≤ 8 folders and sensible folders, and it has not run.
 
 **Files:** `agent/src/main/kotlin/com/secondbrain/agent/SystemPrompt.kt`.
+
+---
+
+## D-068 — Step 5/6 built together: `ConfirmationGate` is the one mechanism for email and calendar, and R2 now holds structurally rather than by dispatcher interception
+**Date:** 2026-09-01
+
+**Decided:** `ToolDispatcher`'s Step-3 placeholder — intercept every `GATED` call and return a canned `awaiting_user_confirmation` result without calling the handler — is removed. A gated handler (`EmailTools.draftEmail`, `CalendarTools.proposeEvent`) now runs exactly like an autonomous one. What makes R2 ("gated tools never execute from a model call") still true is not dispatcher interception any more, but what the handler is *written* to do: build a `Proposal` and call `ConfirmationGate.submit(...)`, which suspends the coroutine — and with it, the whole turn — until a human clicks through every stage, and only then invokes a caller-supplied `executor` lambda that performs the real side effect. There is no code path from a `tool_use` block to `gmail.send`/`events.insert` that does not pass through a resolved gate.
+
+**Why:** Step 3's stub was explicitly a placeholder — its own comment said "this is unreachable today" and "ConfirmationGate resolves these in Step 5." Building the real thing meant choosing where the safety property lives, and dispatcher interception was the wrong place for it: interception can only ever produce a *canned* response, never the real multi-stage content-review / verbatim-verify / execute flow WF-2 and WF-3 describe, which has to live somewhere that can suspend indefinitely, hold per-proposal state, and be driven by UI clicks over an arbitrary amount of real time — exactly the shape `ask_user`'s `CompletableDeferred` pattern (D-055/D-062) already proved out for a different kind of suspend. `ConfirmationGate` reuses that pattern.
+
+`ActionLedger` (new, `AgentDb` migration 2) is the R5 state machine verbatim from ARCHITECTURE §2's `action_ledger`, with one exception: `LedgerKind` is `EMAIL_SEND | CALENDAR_CREATE` only — no `ORDER_PLACE` yet, and correspondingly no `OrderProposal` in the new `Proposal` sealed hierarchy (`EmailProposal`, `CalendarProposal`). Zepto's actual shape is unknown until Step 7's blocking spikes run (D-009), and CLAUDE.md's working style is explicit that designing a third variant now, before anything is validated, is exactly the mistake to avoid.
+
+`Proposal.kind` reuses `LedgerKind` rather than introducing a parallel `ProposalKind` enum with the same two values — a proposal and its ledger row describe the same action, and a second enum would only ever need mapping back and forth to this one.
+
+**Uncertain:** Whether `ConfirmationGate`'s multi-stage design (content review → verbatim verify → ready → executing) generalises cleanly to Step 7's commerce flow, which has a materially different shape (a whole cart, partial failures per item, re-reading server state before proposing). Likely needs its own machinery layered on top rather than a third caller of `submit`.
+
+**Files:** `agent/src/main/kotlin/com/secondbrain/agent/ConfirmationGate.kt`, `ActionLedger.kt`, `agent/.../AgentDb.kt`, `agent/.../ToolDispatcher.kt`, `model/.../Proposal.kt`, `model/.../Ledger.kt`.
+
+---
+
+## D-069 — `TimeResolver` lives in `:model`, not `:vault` — corrects CLAUDE.md's module map
+**Date:** 2026-09-01
+
+**Decided:** `TimeResolver`, `TimeExpression`, `ResolvedTimeRange` and `Ambiguity` are in `model/src/main/kotlin/com/secondbrain/model/TimeResolver.kt`. CLAUDE.md's module map lists `TimeResolver` under `:vault`'s "owns" column; that line is now wrong and this entry corrects it.
+
+**Why:** CalendarTools — the code that actually needs to resolve "tomorrow" against an absolute instant — lives in `:agent` alongside `VaultTools`, in the `ToolRegistry`. `:agent` may not depend on `:vault` (§1); that constraint predates Step 6 and nothing about it changed. Putting `TimeResolver` in `:vault` as CLAUDE.md's table says would have made it unreachable from the one place that needs it, discovered only once `CalendarTools.kt` failed to compile. `:model` costs nothing extra to receive it: `java.time` is JDK-standard, and `:model`'s "zero dependencies beyond kotlinx-serialization" rule is about libraries, not about which module owns pure logic with no I/O.
+
+ARCHITECTURE §7 Step 6 itself hedges — "`:vault` or `:model` — `TimeResolver`" — so this is resolving an ambiguity the architecture document left open, not overriding a firm decision.
+
+**Uncertain:** Nothing about the placement. The resolver's actual date-phrase vocabulary (today/tomorrow/yesterday/ISO date/weekday names, with "next X" and bare "X" both meaning the closest occurrence strictly after today) is a reasonable v1, not exhaustively validated against real speech — same footing as every other threshold in this system awaiting real usage.
+
+**Files:** `model/src/main/kotlin/com/secondbrain/model/TimeResolver.kt`, `model/src/test/.../TimeResolverTest.kt`, `CLAUDE.md`.
+
+---
+
+## D-070 — EC-A8's "one gate at a time" is a structural property of sequential dispatch plus `turnMutex`; `ConfirmationGate`'s busy-check is a defensive backstop, not (yet) a reachable path
+**Date:** 2026-09-01
+
+**Decided:** `ConfirmationGate` holds a single `AtomicReference<Pending?>`; a second `submit()` while one is pending returns `GateOutcome.Busy` synchronously, rolling back the ledger row it had just created. Built and unit-tested directly (two concurrent `submit()` calls in `ConfirmationGateTest`), but honestly documented as **currently unreachable via the real app**: `AgentLoop`'s `for (call in calls)` loop dispatches tool calls sequentially, not concurrently, so a second gated call in the same parallel batch cannot even begin dispatching — and therefore cannot call `submit()` — until the first's `dispatch()` returns, which does not happen until its gate resolves. And `VoiceController.turnMutex` prevents a *second turn* from starting while the first's gate is open at all (decision in D-071 below).
+
+**Why:** ARCHITECTURE's WF description of EC-A8 — "the second gated tool call returns `gate_busy`; Claude queues it and re-proposes after the first resolves" — describes a *rejection-and-retry* mechanism. Given the app's actual concurrency shape, that mechanism's trigger condition (two gate opens racing) cannot occur, so the visible behaviour is different but arguably better: the model's *second* gated tool call, in the same response, simply doesn't run until the first one's entire human-approval round trip completes — sequential resolution rather than a rejected-and-requeued one, with no wasted round trip. D-006 already flagged this exact scenario as unresolved ("whether one-gate-at-a-time is too restrictive in practice... needs testing") without committing to a mechanism; this entry is that decision, made honestly rather than by claiming an untested rejection path is exercised. The `Busy` branch stays in the code — R3's fail-closed instinct says a future caller (a second UI surface, a background job) should not be able to violate "one gate at a time" by construction, and it is real, tested code, just not reachable from today's call graph.
+
+**Uncertain:** Whether a future change (e.g., dispatching parallel tool calls concurrently, for latency) would make `Busy` reachable and whether the resulting UX — a `gate_busy` tool_result telling the model to "wait and re-propose" — is actually good then. Revisit if `AgentLoop`'s dispatch loop ever stops being sequential.
+
+**Files:** `agent/.../ConfirmationGate.kt`, `agent/src/test/.../ConfirmationGateTest.kt`, `agent/.../AgentLoop.kt` (unchanged dispatch loop — see its own updated doc comment).
+
+---
+
+## D-071 — Confirmation is a click, never a spoken "yes"; talking during an open gate queues rather than cancels it — resolves D-048's flagged gap
+**Date:** 2026-09-01
+
+**Decided:** Every button in `ProposalWindow` — Approve, Sounds right / Let me retype it, Cancel, and the final red Send/Create — is a click. Nothing anywhere accepts a spoken "yes" as an irreversible-action confirmation. `VoiceController.MicState` gains `AWAITING_CONFIRMATION`; `onTalkDown()` during that state begins a normal recording (no `cancellation.cancel()`), which then queues on the existing `turnMutex` behind the in-flight turn until its open gate resolves.
+
+**Why:** R9 permits exactly two typing/click exceptions. D-063 already had to argue at length that a *spoken* "yes" for the EC-G2 cost ceiling doesn't count as a third exception — the argument there was specifically that continuing to spend money is "neither irreversible nor a verbatim field." Sending an email or creating an event is irreversible by definition, so that argument is unavailable here; treating a spoken "yes" as a send/create confirmation would be a genuine, unjustified third exception. WF-2/WF-3's own diagram language ("TTS: ... {User action}") is ambiguous about the channel; this entry resolves it in the only direction R9 supports.
+
+`AgentLoop.Cancellation`'s doc has said "re-examine at Step 5" since Step 3, flagging that cancelling with a proposal in flight was a ledger question. The answer: don't cancel it. `cancellation.cancel()` sets a flag `AgentLoop.run` only checks *between* calls, never during one — so even if something did call it while a call was suspended inside `ConfirmationGate.submit`, the open gate would be unaffected; the risk was never a crash, it was a *UX* one — discarding a real "sent" outcome the instant it resolves, because the top-of-loop check would immediately read `end = CANCELLED` and blank `spokenText` (see `AgentLoop.run`'s cancellation branch). Not calling `cancel()` at all during `AWAITING_CONFIRMATION` sidesteps that risk entirely, at the cost of the new recording's *turn* not starting until the open one finishes — which is the same "one gate at a time" property D-070 already establishes by other means, so nothing new is lost.
+
+**Uncertain:** Whether waiting behind an open gate (rather than, say, some other explicit "later" affordance) feels right in practice for someone who wanted to say something unrelated while a proposal sits open. Untested against a real user.
+
+**Files:** `app/src/main/kotlin/com/secondbrain/app/voice/VoiceController.kt`, `ProposalWindow.kt`, `agent/.../AgentLoop.kt` (doc only), `agent/.../ConfirmationGate.kt` (cancel()/withPending()'s EXECUTING guards).
+
+---
+
+## D-072 — EC-C2 is now actually wired end to end: `AgentLoop.run` takes the utterance's own instant and zone; `TurnClock` carries it to `CalendarTools`
+**Date:** 2026-09-01
+
+**Decided:** `AgentLoop.run` gains `utteranceAt: Instant` and `zone: ZoneId` parameters (defaulted to call-time for source compatibility with `AgentLoopTest` and `CaptureHarness`, neither of which has a real recording to time-stamp). `VoiceController.runTurn` passes `utterance.startedAt`/`utterance.zoneId`. `SystemPrompt.userTurn` takes the instant as a parameter instead of defaulting to `Instant.now()` at call time. A new `TurnClock` (tiny, `:agent`) holds the current turn's `(Instant, ZoneId)`, set once at the top of `run`; `CalendarTools` reads it when resolving relative time.
+
+**Why:** `Utterance.startedAt`'s own doc comment has said since Step 1 — "EC-C2: 'tomorrow' spoken at 23:58 must resolve against the timestamp of the *utterance*, not of the API call that eventually processes it... The calendar workflow is Step 6, but the field is free today and a painful retrofit later." That retrofit is now due, and checking confirmed it actually was needed: `AgentLoop.run` never took a timestamp parameter at all, and `SystemPrompt.userTurn`'s `now` parameter defaulted to `Instant.now()` evaluated inside `run()` — close to "STT finished," not "recording started," and on a turn with one or two `ask_user` round trips, that gap is minutes, which is exactly the window EC-C2 exists to get right.
+
+`TurnClock` exists because `ToolSpec.handler`'s signature (`suspend (String) -> ToolOutcome`, fixed since Step 3) has no room for per-turn context, and changing it would touch every one of the seven already-registered vault tools for a need only the two new calendar tools have. A small mutable holder set once per turn, read by the one tool group that needs it, is the same trick this codebase already uses for other cross-boundary state (`lateinit var voiceController` in `Main.kt`, the `@Volatile` fields in `VoiceController`) — and `VoiceController.turnMutex` already guarantees exactly one turn touches it at a time, so there is no new synchronisation to get wrong.
+
+**Uncertain:** Nothing about the mechanism. Whether resolving the system prompt's "Current date and time" line against recording-start rather than call-time changes anything observable outside of calendar (it's a few seconds' difference in the common case) is unmeasured and probably immaterial.
+
+**Files:** `agent/.../AgentLoop.kt`, `agent/.../TurnClock.kt`, `agent/.../SystemPrompt.kt`, `app/.../VoiceController.kt`.
+
+---
+
+## D-073 — Ambiguity resolution is its own autonomous tool, called before the gated propose; ledger idempotency is our own state machine, not a server-side key
+**Date:** 2026-09-01
+
+**Decided:** `calendar_resolve_time` (AUTONOMOUS) takes the pieces of a spoken time expression and returns either a resolved absolute range or a spoken question; the model calls `ask_user` with that question and calls `calendar_resolve_time` again. `calendar_propose_event` (GATED) only ever accepts an already-resolved absolute start/end/zone — it never lets Claude supply relative language or compute a timestamp. `calendar_find_conflicts` (AUTONOMOUS) is available separately but `calendar_propose_event` always re-checks conflicts internally regardless of whether the model called it, so EC-C4 can never be silently skipped by an omitted call.
+
+Idempotency against a double-send/double-create is entirely `ActionLedger`'s state machine — `EXECUTING` written before the adapter call, nothing ever auto-retrying `UNKNOWN`/`FAILED` (R5) — not a server-side deduplication token. Gmail's `messages.send` has no such token at all. Calendar's `events.insert` gets the ledger's `proposal_id` written into an extended property anyway, as defence in depth for a manual audit, but that property is never read back by anything in this codebase to decide whether to skip a create.
+
+**Why:** WF-3's own diagram order is Time Resolver → ambiguity → `ask_user` loop → *then* `calendar_propose_event`; splitting resolution into its own tool is what makes that order enforceable rather than aspirational; a single tool that both resolves time and creates the proposal would let the model skip straight past an ambiguity by supplying a guessed absolute time, which is precisely what D-010 says never to allow. Re-checking conflicts inside `calendar_propose_event` itself (rather than trusting the model to have called `calendar_find_conflicts` first) is the same "belt and braces" instinct as D-034's atomic-write retry-then-fallback: a warning that depends on the model remembering an extra step is not a warning that is actually always shown.
+
+**Uncertain:** The resolver's ambiguity vocabulary (`HOUR_12_OR_24`, `MISSING_DATE`, `MISSING_DURATION`) may miss a real case once actual speech is thrown at it — same footing as every other v1 threshold here.
+
+**Files:** `agent/.../CalendarTools.kt`, `model/.../TimeResolver.kt`, `ports/.../MailPort.kt`, `ports/.../CalendarPort.kt`.
+
+---
+
+## D-074 — OAuth tokens get their own file, not `app.db`; `ActionLedger` reconciles on startup exactly per EC-A9
+**Date:** 2026-09-01
+
+**Decided:** `oauth_tokens` is a table in its own SQLite file (`oauth_tokens.db`, path configurable via `google.token_store_path`), owned entirely by `:integrations`' new `TokenStore`. This supersedes ARCHITECTURE §2, which places `oauth_tokens` inside `app.db`. `ActionLedger.reconcileOnStartup()` runs once in `Main.kt`, before anything else touches the ledger: `PROPOSED`/`APPROVED` rows become `CANCELLED`, `EXECUTING` rows become `UNKNOWN` — verbatim EC-A9 and R5's "nothing re-executes on restart."
+
+**Why:** `:integrations` cannot depend on `:agent`'s `AgentDb` or `:vault`'s `AppDb` — no such edge exists in §1, and adding one would be exactly the kind of violation `verifyModuleGraph` exists to catch. `app.db` already has two schema owners after D-026/D-045 (`:vault`'s `folder_decisions`, `:agent`'s conversations/messages/cost_meter/now action_ledger); giving OAuth tokens a third, cross-cutting home inside a file neither module that would write it can reach is worse than one small dedicated file. Unlike the action ledger, `oauth_tokens.db` is not R10-precious — losing it costs one more consent-screen click, not data.
+
+Reconciliation was verified safe against `ConversationStore` specifically, not just asserted: a turn's messages are only persisted once `AgentLoop.run` returns (`VoiceController.runTurn` calls `store.recordTurn` after `agentLoop.run(...)`, never before), so a crash while a gate is open leaves no orphaned `tool_use`/`tool_result` pairing in the conversation history to repair on restart — only the ledger row, which reconciliation now handles.
+
+**Uncertain:** Nothing about the mechanism (both are directly unit-tested — see `ActionLedgerTest`). Whether the interrupted-`EXECUTING` case (an email that genuinely sent, but the app died before recording `DONE`) will ever actually surface to a real user, and whether "the ledger says UNKNOWN, check manually" is a good enough answer for that, is unmeasured until it happens once for real.
+
+**Files:** `integrations/.../TokenStore.kt`, `agent/.../ActionLedger.kt`, `app/.../Main.kt`, `agent/src/test/.../ActionLedgerTest.kt`.
+
+---
+
+## D-075 — Real Google OAuth via the official Java client library, two least-privilege scopes, optional at startup; Gmail's raw message is hand-built, not via a mail library
+**Date:** 2026-09-01
+
+**Decided:** `:integrations` depends on `google-api-client`, `google-oauth-client-jetty`, `google-api-services-gmail`, `google-api-services-calendar` (versions found against Maven Central at implementation time — see the `libs.versions.toml` comment; unverified against a real build, since this environment has no JDK). `GoogleAuth` runs the interactive "loopback IP address" consent flow (`LocalServerReceiver`, opens a browser once) on first use, persists only the resulting access/refresh tokens to `TokenStore` (bypassing the library's own on-disk `DataStoreFactory` entirely), and reconstructs a `Credential` from those tokens on every later run, refreshing a minute early. Exactly two scopes are ever requested: `gmail.send` and `calendar.events` — this app cannot read or search Gmail even if a bug tried to. `google.client_id`/`client_secret` are optional in config: blank means `Main.kt` logs a warning and does not register `email_draft`/the calendar tools at all, rather than failing startup the way a missing `agent.api_key` does.
+
+`GmailAdapter` builds the raw RFC 2822 message (`To`/`Cc`/`Subject`/body, base64url-encoded) by hand rather than pulling in a JavaMail/Jakarta Mail dependency for it.
+
+**Why:** The official client library was chosen over a hand-rolled REST caller for the same reason D-044 chose the Anthropic SDK over hand-rolled JSON: OAuth token refresh, retry-on-5xx and request signing come for free instead of being a second thing to get subtly wrong. `TokenStore` bypassing the library's own persistence is deliberate, not an oversight — see D-074: the whole point was one file, at a path this app controls, not wherever `FileDataStoreFactory` defaults to.
+
+Google is optional, unlike Claude/Gemini, because Steps 3-4's voice capture is a complete, useful product with no Google account at all — failing startup over a feature the user may not want yet would regress that. This is a narrower, later check than EC-G1's "named, actionable error at startup"; the feature is opt-in by credential presence, and the first *use* of `email_draft` without credentials configured simply never happens because the tool was never registered — there is no runtime 401 to discover mid-conversation, which is what EC-G1 actually protects against.
+
+The hand-built raw message avoids a real dependency (JavaMail's MIME tree, attachments, multipart — none of which this app has any use for) for a ~20-line job, the same call `ConfigLoader`'s hand-rolled TOML reader (D-012) and the not-yet-built Zepto MCP client (D-009/D-023) already made for themselves. RFC 2047 encoded-word handling for a non-ASCII subject is included because EC-V5 means a transcript-derived subject genuinely can be mixed-script.
+
+**Uncertain:** Everything here is built and, per this sandbox having no JDK, has compiled in the author's head and against documented API shapes but not against a real build or a real Google account — the same class of gap D-056/D-065/D-067 already logged for other external services, now applying to this one too. The library versions in `libs.versions.toml` were found via web search at implementation time and may need a bump the first time `./gradlew.bat build` actually runs against them. `EventDateTime`'s all-day date format and `Event.ExtendedProperties.setPrivate`'s exact generated-model shape are believed correct from the Calendar API's long-stable JSON schema but are unverified against a live response.
+
+**Files:** `integrations/build.gradle.kts`, `gradle/libs.versions.toml`, `integrations/.../GoogleAuth.kt`, `GmailAdapter.kt`, `CalendarAdapter.kt`, `TokenStore.kt`, `model/.../AppConfig.kt` (`GoogleConfig`), `config.example.toml`, `app/.../Main.kt`.
+
+---
+
+## D-076 — `request_typed_input` is two mechanisms: a general model-callable tool, and `ProposalWindow`'s own inline retype — D-054 registered neither, this registers both
+**Date:** 2026-09-01
+
+**Decided:** `request_typed_input` (AUTONOMOUS, registered by `EmailTools`) lets the model itself ask for a typed value at any point in a turn — `VoiceController.handleTypedInput` speaks the prompt and suspends on a `CompletableDeferred`, exactly mirroring `handleAskUser`'s pattern but resolved by a keyboard overlay (`TypedInputOverlay`) instead of the next spoken utterance. Separately, `ProposalWindow`'s own verbatim-verify stage has its own "Let me retype it" inline text field per address field, which never goes through the model at all — it calls `ConfirmationGate.retypeVerbatim` directly, because the user is already looking at the exact field that needs correcting and a model round trip would add nothing.
+
+**Why:** D-054 explicitly deferred this: "`request_typed_input` is listed as autonomous in §4 but belongs to Step 5... nothing in Step 3 has a verbatim field." Building only the general tool and not the inline correction (or vice versa) would leave one of WF-2's two documented typing moments unimplemented — "ask_user first if you don't [know the recipient]" needs the general tool when the model itself is the one missing information; "the spelled-back address is wrong" needs the inline correction when the *user* is the one flagging it, mid-review, with no new fact for the model to learn.
+
+Both reuse `VaultTools.AskResult` (`Answered`/`NoAnswer`) rather than a parallel type — the distinction "got a usable value" vs "silence/cancelled/failed" is identical to what `ask_user` already needed (D-055), just keyboard-driven.
+
+**Uncertain:** Nothing about the split. Whether the general `request_typed_input` tool's shape validation (email-shape checked inline, everything else just non-blank) is sufficient for a "phone number" or other kind the schema allows is unvalidated — no real call has exercised it.
+
+**Files:** `agent/.../EmailTools.kt`, `app/.../VoiceController.kt`, `app/.../TypedInputOverlay.kt`.
+
+---
+
+## D-077 — The spoken summary is announced by `VoiceController` watching the gate open, not by the model's own reply
+**Date:** 2026-09-01
+
+**Decided:** `VoiceController.observeConfirmationGate` speaks `proposal.speechSummary` once, the instant a new proposal id appears in `ConfirmationGate.state` — before setting `MicState.AWAITING_CONFIRMATION`, so the mic-state label reads "Speaking" while the summary plays and only then "Waiting for you."
+
+**Why:** Caught by tracing the actual control flow, not assumed: WF-2/WF-3 say "TTS speaks a SUMMARY of the body" / "TTS: tomorrow, Tuesday the 2nd, noon to 1 PM" as something that happens when the window opens, which reads as if it is the model's own next reply. It cannot be — the model's turn is itself suspended *inside* `ConfirmationGate.submit` for as long as the window is open (that is the entire point of the gate), so no `tool_result` reaches the model, and it gets no opportunity to say anything, until a human has already resolved the proposal. Left unfixed, the user would see the window appear in total silence and only hear anything once they had already clicked through it — exactly backwards from a workflow whose stated purpose is to help someone decide with the window and the narration together. `EmailTools`/`CalendarTools` already had to build a `speechSummary` string for the window's own header for a different reason (EC-T5: never speak the body/description verbatim); this reuses it as the thing actually spoken, from the one place with a real opportunity to speak it independently of the model's turn.
+
+**Uncertain:** Whether re-announcing after a content edit (the summary is static, built once at proposal-creation time and never regenerated by `ConfirmationGate.editField`) would be worth the added noise — untested; the current call is "announce once, on open, and let the window's own text speak for edits from there."
+
+**Files:** `app/src/main/kotlin/com/secondbrain/app/voice/VoiceController.kt`.

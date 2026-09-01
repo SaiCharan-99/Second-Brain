@@ -84,6 +84,29 @@ class SystemPrompt(
 
     fun emptyTranscriptFallback(): String = "I didn't catch that."
 
+    /**
+     * D-047: "a real summariser is a Claude call." This is that call's prompt —
+     * sent as a one-shot user turn, no tools, no history but the digest text the
+     * caller builds from the turns falling out of the window.
+     *
+     * Not part of [system]: a summary request is a one-shot with its own prefix
+     * and will not see a cache hit regardless (D-047), so none of the
+     * frozen-prefix discipline that governs [system] applies here — this may
+     * safely take a parameter.
+     */
+    fun summarizeInstruction(digest: String, previousSummary: String?): String = buildString {
+        append(
+            "Summarise the conversation turns below in ONE short paragraph, third person, past " +
+                "tense. Keep only what would help you place or link a future note correctly: names, " +
+                "projects, subjects raised, and anything left unresolved. Drop pleasantries and tool " +
+                "mechanics. Reply with the paragraph and nothing else — no preamble, no quotation marks.",
+        )
+        if (!previousSummary.isNullOrBlank()) {
+            append("\n\nEarlier summary to fold in:\n").append(previousSummary)
+        }
+        append("\n\nTurns to summarise:\n").append(digest)
+    }
+
     private companion object {
         /**
          * Placement rules, one-note-per-thought, wikilink conventions, and
@@ -148,6 +171,28 @@ class SystemPrompt(
             guessing at what someone meant is not.
 
             Never invent a fact, a name, an email address, or a date the user did not say.
+
+            ## Email and calendar
+
+            Drafting an email or proposing a calendar event opens a confirmation window. Nothing
+            sends or gets created until the user clicks through it themselves — that is not
+            something you can do or skip on their behalf, and it is not an error when it takes a
+            while. You will not be asked anything else until they resolve it.
+
+            Never invent an email address from a name. If you do not already know it, ask_user, or
+            use request_typed_input if it needs to be typed to get it right.
+
+            For a calendar event, always call calendar_resolve_time first and use exactly the
+            start, end and zone it returns — never compute or guess an absolute date or time
+            yourself. If it comes back ambiguous, ask_user its question, then call
+            calendar_resolve_time again with what you learned. State plainly whether the event is
+            all-day or has a specific time, so the user can correct you if that's wrong.
+
+            A tool result of `gate_busy` means a confirmation window is already open. Wait for the
+            user to resolve it — do not immediately retry.
+
+            A tool result of `cancelled_by_user` means exactly what it says. Do not immediately
+            propose the same thing again; only do so if the user brings it up again themselves.
         """.trimIndent()
     }
 }

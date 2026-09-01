@@ -53,7 +53,7 @@ class AgentDb(
         const val MODULE: String = "agent"
 
         /** Bump when adding a migration. Never renumber an existing one. */
-        const val SCHEMA_VERSION: Int = 1
+        const val SCHEMA_VERSION: Int = 2
     }
 
     init {
@@ -106,6 +106,7 @@ class AgentDb(
         connection.autoCommit = false
         try {
             if (current < 1) migrateTo1()
+            if (current < 2) migrateTo2()
             recordVersion(SCHEMA_VERSION)
             connection.commit()
         } catch (e: Exception) {
@@ -176,6 +177,33 @@ class AgentDb(
             )
             s.execute("CREATE INDEX IF NOT EXISTS idx_cost_meter_conv ON cost_meter(conv_id)")
             s.execute("CREATE INDEX IF NOT EXISTS idx_cost_meter_at ON cost_meter(at)")
+        }
+    }
+
+    /**
+     * Migration 2 — the action ledger, Step 5/6's `ActionLedger`. Schema from
+     * ARCHITECTURE §2's `action_ledger`, unchanged, except `oauth_tokens` is
+     * NOT here — see `GoogleConfig`'s doc comment: `:integrations` cannot reach
+     * this database (no such dependency edge in §1), so OAuth tokens get their
+     * own small file instead. Supersedes §2 on that one table only.
+     */
+    private fun migrateTo2() {
+        connection.createStatement().use { s ->
+            s.execute(
+                """
+                CREATE TABLE IF NOT EXISTS action_ledger (
+                  proposal_id TEXT PRIMARY KEY,
+                  kind        TEXT NOT NULL,
+                  payload     TEXT NOT NULL,
+                  state       TEXT NOT NULL,
+                  external_id TEXT,
+                  error       TEXT,
+                  created_at  TEXT NOT NULL,
+                  updated_at  TEXT NOT NULL
+                )
+                """.trimIndent()
+            )
+            s.execute("CREATE INDEX IF NOT EXISTS idx_action_ledger_state ON action_ledger(state)")
         }
     }
 

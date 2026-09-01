@@ -182,13 +182,26 @@ class GeminiStt(
         }
     }
 
+    /**
+     * D-065: measured against the live API before this model was wired in.
+     * `gemini-3.5-transcribe` does not return a plain `parts[].text` block the
+     * way a general chat model does — it returns a structured
+     * `parts[].audioTranscription.text` part instead. Checked first, since
+     * every live response observed used it exclusively; `text` stays as a
+     * fallback rather than a first choice, in case a future response ever
+     * mixes freeform commentary in alongside the transcription part.
+     */
     private fun extractText(responseBody: String): String? = runCatching {
-        json.parseToJsonElement(responseBody)
+        val parts = json.parseToJsonElement(responseBody)
             .jsonObject["candidates"]?.jsonArray?.firstOrNull()
             ?.jsonObject?.get("content")
             ?.jsonObject?.get("parts")?.jsonArray
-            ?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content }
-            ?.joinToString("")
+            ?: return@runCatching null
+
+        parts.mapNotNull { part ->
+            part.jsonObject["audioTranscription"]?.jsonObject?.get("text")?.jsonPrimitive?.content
+                ?: part.jsonObject["text"]?.jsonPrimitive?.content
+        }.joinToString("").ifEmpty { null }
     }.getOrElse {
         log.warn("Could not parse Gemini response: {}", it.message)
         null

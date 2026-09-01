@@ -155,7 +155,18 @@ class ToolDispatcherTest {
     inner class Classes {
 
         @Test
-        fun `a gated tool never executes from a model call`() = runTest {
+        @DisplayName("since Step 5: a gated tool's handler runs like any other - R2 lives in ConfirmationGate now")
+        fun `a gated tool's handler executes exactly like an autonomous one`() = runTest {
+            // Through Step 3 the dispatcher special-cased GATED and returned a
+            // canned "awaiting_user_confirmation" without calling the handler -
+            // a placeholder for a mechanism that did not exist yet (see this
+            // class's doc). Now that ConfirmationGate exists, a gated handler
+            // is trusted to embed its OWN suspend-for-approval logic (calling
+            // ConfirmationGate.submit), so the dispatcher treats both classes
+            // identically. The actual "never executes from a model call"
+            // property is tested at ConfirmationGateTest, where it is real:
+            // the handler below stands in for one that calls gate.submit(...)
+            // and blocks there until a human resolves it.
             var executed = false
             val reg = ToolRegistry.builder()
                 .gated("email_draft", "drafts an email", """{"type":"object","properties":{},"required":[]}""") {
@@ -166,9 +177,8 @@ class ToolDispatcherTest {
 
             val result = ToolDispatcher(reg).dispatch(call("email_draft", "{}"))
 
-            assertFalse(executed, "R2: a gated handler must not run because the model asked")
-            assertEquals("email_draft", result.gatedToolName)
-            assertTrue(result.result.content.contains("awaiting_user_confirmation"))
+            assertTrue(executed)
+            assertTrue(result.result.content.contains("\"sent\":true"))
             assertEquals(ToolClass.GATED, result.event.toolClass)
         }
 

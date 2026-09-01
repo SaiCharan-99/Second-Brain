@@ -29,8 +29,12 @@ root = "~/.secondbrain"
 # Gemini. REQUIRED — both of these.
 #
 # EC-G3: the model id lives here, never in code. A 404 from Gemini names this key.
-# The exact model string is spike S1.1; confirm it before trusting this default.
-model   = "gemini-2.5-flash"
+# gemini-3.5-transcribe is a dedicated speech-to-text model (D-065), measured
+# live before being set as the default — verbatim by design, not a chat model
+# prompted to behave like a transcriber. Its generateContent response carries
+# the text under parts[].audioTranscription.text, not parts[].text; GeminiStt
+# checks both.
+model   = "gemini-3.5-transcribe"
 api_key = ""                                   # REQUIRED  <-- your Gemini API key
 
 base_url = "https://generativelanguage.googleapis.com"
@@ -48,19 +52,22 @@ request_timeout_ms = 60000
 
 # ─────────────────────────────────────────────────────────────────────────────
 [tts]
-# Kokoro. REQUIRED — model, voice and base_url.
+# Gemini native audio (D-065), superseding §7 Step 1's Kokoro assumption —
+# measured live before being wired in. model/voice/base_url all default to
+# Gemini's own values below, so this whole section can be omitted if
+# api_key is set via SECONDBRAIN_TTS_API_KEY instead.
 #
-# STATUS: the endpoint contract is spike S1.2 and is NOT yet confirmed. The
-# client implements the OpenAI-compatible POST /v1/audio/speech shape that
-# kokoro-fastapi and the common hosted deployments expose. If your provider
-# differs, this section and KokoroTts.kt both change.
-model    = "kokoro"
-voice    = "af_heart"
-base_url = ""                                  # REQUIRED  <-- e.g. http://localhost:8880
-api_key  = ""                                  # optional; sent as a bearer token
+# api_key is REQUIRED — Gemini TTS genuinely needs one, unlike a self-hosted
+# Kokoro deployment, which often didn't. Usually the same key as stt.api_key.
+model    = "gemini-3.1-flash-tts-preview"
+voice    = "Kore"                              # a Gemini prebuilt voice name
+base_url = "https://generativelanguage.googleapis.com"
+api_key  = ""                                  # REQUIRED  <-- your Gemini API key
 
-# The JVM ships no MP3 decoder, so "wav" (or "pcm") is required unless you add
-# a decode dependency. Asking for mp3 fails with a message naming this key.
+# KokoroTts still exists in :voice, for anyone who points base_url at a
+# self-hosted endpoint instead — response_format and speed are read only by
+# that implementation. GeminiTts always gets raw PCM back and has no speed
+# parameter (only prompt phrasing, e.g. "Say slowly: ...").
 response_format = "wav"
 speed           = 1.0
 
@@ -68,7 +75,7 @@ max_attempts       = 3
 initial_backoff_ms = 500
 request_timeout_ms = 60000
 
-# EC-T3: Kokoro cold start is audible dead air. Play a soft cue after this long.
+# EC-T3: fill audible dead air with a soft cue after this long.
 thinking_cue_after_ms = 1500
 
 # EC-T4: when the endpoint is unreachable, speak through the local platform
@@ -219,6 +226,27 @@ atomic_move_backoff_ms = 40
 model   = "claude-opus-5"
 api_key = ""                                   # REQUIRED  <-- your Anthropic API key
 
+# D-066: only set this if your API key is "identity-linked" - a personal or
+# service-account key scoped to more than one Anthropic workspace. Such a key
+# fails every request with "anthropic-workspace-id is required..." until this
+# is set; a plain single-workspace key needs nothing here. Find the ID (a
+# wrkspc_... string) under Settings > Workspaces in the Claude Console, or
+# sidestep this entirely by creating a key from within one specific workspace.
+# workspace_id = ""
+
+# D-067: leave unset to use Anthropic directly. Point this at another server
+# that speaks the same Anthropic Messages API wire format instead - measured
+# working against DeepSeek's compatible endpoint:
+#   base_url = "https://api.deepseek.com/anthropic"
+#   model    = "deepseek-v4-pro"      # or deepseek-v4-flash, cheaper/faster
+# DeepSeek ignores cache_control (a silent no-op, not an error) and
+# budget_tokens; the [agent] pricing fields below and cache_enabled need
+# updating to match whichever backend model is actually running, or the
+# per-capture cost figure silently corrupts (H1 / D-046's own warning, now
+# doubly true across providers). effort's support there is unconfirmed -
+# leave it blank ("") rather than guessing.
+# base_url = ""
+
 # Model used for rolling summaries and phase carry-over. Same model by default so
 # there is one cache namespace; a summary call is a one-shot with its own prefix
 # and will not see cache hits either way.
@@ -297,3 +325,31 @@ output_usd_per_mtok = 25.00
 cache_write_multiplier = 1.25
 # Cache reads are ~0.1x base input.
 cache_read_multiplier  = 0.1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+[google]
+# OPTIONAL. Steps 5-6: email_draft and the calendar tools. Unlike stt/tts/agent
+# above, leaving this blank does not fail startup — Main.kt logs a warning and
+# simply does not register those tools, so voice capture keeps working with no
+# Google account at all.
+#
+# Create an OAuth 2.0 client in Google Cloud Console (APIs & Services >
+# Credentials > Create Credentials > OAuth client ID > Application type:
+# Desktop app). Enable the Gmail API and the Google Calendar API on the same
+# project. Only two scopes are ever requested: gmail.send (never read/search
+# Gmail) and calendar.events - least privilege for what this app actually does.
+client_id     = ""
+client_secret = ""
+
+# 0 lets the loopback receiver pick a free port itself (the current "loopback
+# IP address" flow Google's docs describe, which needs no fixed redirect URI
+# registered on a Desktop-app client). Only set a fixed port if your OAuth
+# client predates that and has one specific redirect URI registered.
+redirect_port = 0
+
+# Its own SQLite file under [paths].root - not app.db. See GoogleConfig's own
+# doc comment for why: :integrations cannot reach AgentDb or AppDb, and this is
+# a clean, non-precious sub-domain (losing it just means one more consent
+# screen, not a rebuild).
+token_store_path = "oauth_tokens.db"

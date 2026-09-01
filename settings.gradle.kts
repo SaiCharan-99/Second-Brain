@@ -11,6 +11,13 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         mavenCentral()
+        // Compose Multiplatform's desktop artifacts (:app, Step 4) pull in a
+        // handful of transitive androidx.* modules - annotation, collection,
+        // lifecycle, savedstate - that are published only to Google's Maven
+        // repository, never to Maven Central. Measured: :app:compileKotlin
+        // fails to resolve androidx.collection:collection etc. without this,
+        // even though nothing in this repo targets Android (D-058).
+        google()
     }
 }
 

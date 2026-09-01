@@ -44,9 +44,9 @@ Never store unrecoverable state in `index.db`. Never store keys in either. Never
 
 | Module | Owns | May depend on |
 |---|---|---|
-| `:model` | Data classes only. `NoteDraft`, `Proposal`, `Utterance`, `AppConfig`, `ResolvedTimeRange`. | kotlinx-serialization only |
+| `:model` | Data classes only, plus pure logic with zero I/O. `NoteDraft`, `Proposal`, `Utterance`, `AppConfig`, `TimeResolver`/`ResolvedTimeRange` (moved here from `:vault` — D-069: `:agent`'s calendar tools need it directly and cannot depend on `:vault`). | kotlinx-serialization only |
 | `:ports` | Interfaces only. `SttPort`, `TtsPort`, `VaultStore`, `MailPort`, `CalendarPort`, `CommerceAdapter`, `LlmPort`. | `:model` |
-| `:vault` | `PathSafety`, `Slugifier`, `NoteRenderer`, `FolderGuard`, `LinkResolver`, `AtomicWriter`, `VaultWriter`, `VaultIndex`, `FileWatcher`, `TimeResolver`. | `:model`, `:ports` |
+| `:vault` | `PathSafety`, `Slugifier`, `NoteRenderer`, `FolderGuard`, `LinkResolver`, `AtomicWriter`, `VaultWriter`, `VaultIndex`, `FileWatcher`. | `:model`, `:ports` |
 | `:voice` | `JvmAudioCapture`, `JvmAudioPlayback`, `VoiceGate`, `GeminiStt`, `KokoroTts`, `SpeechNormalizer`. | `:model`, `:ports` |
 | `:agent` | `ClaudeClient`, `ToolRegistry`, `ToolDispatcher`, `AgentLoop`, `ConfirmationGate`, `ActionLedger`, `ConversationStore`, `CostMeter`, prompts. | `:model`, `:ports` |
 | `:integrations` | `GmailAdapter`, `CalendarAdapter`, `McpClient`, `McpCommerceAdapter`, `FakeCommerceAdapter`, `MutationClassifier`. | `:model`, `:ports` |

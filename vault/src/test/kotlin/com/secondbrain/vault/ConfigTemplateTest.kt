@@ -23,13 +23,20 @@ class ConfigTemplateTest {
         return candidates.first { Files.exists(it) }
     }
 
+    /**
+     * Fills every blank `api_key = ""` (stt, tts, agent — three of them,
+     * D-065 made tts's a REQUIRED one too) regardless of the column-alignment
+     * whitespace around `=`. A fixed-whitespace `.replace()` broke silently
+     * the moment that alignment shifted by one space — exactly what happened
+     * here — so this matches on content, not layout.
+     */
+    private fun fillRequiredKeys(text: String): String =
+        text.replace(Regex("api_key\\s*=\\s*\"\""), "api_key = \"AIza-fake\"")
+
     @Test
-    @DisplayName("the committed template parses, once the two REQUIRED keys are filled in")
+    @DisplayName("the committed template parses, once the REQUIRED keys are filled in")
     fun `template parses`() {
-        val filled = Files.readString(template())
-            .replace("""api_key = ""       """, """api_key = "AIza-fake"  """)
-            .replace("""api_key = """"", """api_key = "AIza-fake"""")
-            .replace("""base_url = """"", """base_url = "http://localhost:8880"""")
+        val filled = fillRequiredKeys(Files.readString(template()))
 
         val tmp = Files.createTempFile("cfg", ".toml")
         Files.writeString(tmp, filled)
@@ -37,8 +44,8 @@ class ConfigTemplateTest {
         val config = ConfigLoader.load(tmp, env = emptyMap(), userHome = tmp.parent.toString())
 
         // Spot-check that each section actually landed, including the new one.
-        assertEquals("gemini-2.5-flash", config.stt.model)
-        assertEquals("af_heart", config.tts.voice)
+        assertEquals("gemini-3.5-transcribe", config.stt.model)
+        assertEquals("Kore", config.tts.voice)
         assertEquals(16_000, config.audio.sampleRateHz)
         assertEquals(400L, config.gate.minUtteranceMs)
         assertEquals(30, config.sessions.retentionDays)
@@ -63,9 +70,7 @@ class ConfigTemplateTest {
         // The assertions above all happen to equal the AppConfig defaults, so they
         // would pass even if [vault] were being dropped on the floor. This changes
         // a value away from its default and checks it lands.
-        val filled = Files.readString(template())
-            .replace("""api_key = """"", """api_key = "AIza-fake"""")
-            .replace("""base_url = """"", """base_url = "http://localhost:8880"""")
+        val filled = fillRequiredKeys(Files.readString(template()))
             .replace("folder_similarity_threshold = 0.72", "folder_similarity_threshold = 0.55")
             .replace("max_top_level_folders = 12", "max_top_level_folders = 20")
             .replace("max_slug_length = 80", "max_slug_length = 42")
@@ -89,9 +94,7 @@ class ConfigTemplateTest {
         // single-level loader would have dropped silently - wrong prices, no
         // error, and a corrupted budget for every step after this one. This test
         // is here so that cannot come back.
-        val filled = Files.readString(template())
-            .replace("""api_key = """"", """api_key = "AIza-fake"""")
-            .replace("""base_url = """"", """base_url = "http://localhost:8880"""")
+        val filled = fillRequiredKeys(Files.readString(template()))
             .replace("model   = \"claude-opus-5\"", "model   = \"claude-opus-5\"")
             .replace("max_iterations       = 12", "max_iterations       = 7")
             .replace("input_usd_per_mtok  = 5.00", "input_usd_per_mtok  = 9.99")

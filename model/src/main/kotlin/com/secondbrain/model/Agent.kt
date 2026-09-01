@@ -135,7 +135,15 @@ data class AgentTurnResult(
     val conversationId: String,
     val turnIndex: Int,
     val phase: Phase,
-    /** Already normalised and capped for speech (EC-T1, EC-T2). */
+    /**
+     * The model's raw text reply. NOT yet normalised or capped for speech.
+     *
+     * `:agent` cannot depend on `:voice` (§1), so `SpeechNormalizer` and
+     * EC-T2's cap are architecturally impossible to apply here — they can only
+     * run in `:app`, the one module that sees both, exactly as
+     * `VoiceHarness.speak()` already does for its own text. An earlier version
+     * of this comment claimed otherwise; corrected in Step 4 (D-059).
+     */
     val spokenText: String,
     val end: TurnEnd,
     val toolEvents: List<ToolEvent>,
@@ -173,13 +181,48 @@ data class AgentConfig(
     @SerialName("api_key") val apiKey: String = "",
 
     /**
+     * D-066: only some organisations need this. A personal or service-account
+     * key scoped to more than one Anthropic workspace ("identity-linked")
+     * must name which workspace each request acts in, via the
+     * `anthropic-workspace-id` header — a single-workspace key needs nothing
+     * here at all. Blank (the default) omits the header entirely.
+     */
+    @SerialName("workspace_id") val workspaceId: String? = null,
+
+    /**
+     * D-067: blank means the Anthropic SDK's own default
+     * (`https://api.anthropic.com`). Set to
+     * `https://api.deepseek.com/anthropic` to run [model] against DeepSeek's
+     * Anthropic-wire-compatible endpoint instead — same SDK, same request
+     * shape, a different server. Measured before being wired in: DeepSeek
+     * ignores `cache_control` rather than rejecting it (prompt caching is a
+     * silent no-op there, not an error) and ignores `budget_tokens`; both are
+     * already unused by this client, which sends only `{type: "adaptive"}`
+     * thinking and no token budget.
+     */
+    @SerialName("base_url") val baseUrl: String? = null,
+
+    /**
      * Thinking is ON by default on Opus 5, and thinking tokens bill as output.
      * `budget_tokens` returns a 400 on this model — depth is controlled by
      * [effort], not by a token budget (H3 / D-049).
+     *
+     * D-066: neither this nor [effort] is universal across models. Claude
+     * Haiku 4.5 supports adaptive thinking on no code path this client
+     * implements at all — only Opus/Sonnet/Fable-tier `{type: "adaptive"}` is
+     * wired — so a Haiku config must set this false.
      */
     @SerialName("thinking_enabled") val thinkingEnabled: Boolean = true,
 
-    /** low | medium | high | xhigh | max. Defaults to the API default. */
+    /**
+     * low | medium | high | xhigh | max. Defaults to the API default.
+     *
+     * D-066: rejected outright (400) on Claude Haiku 4.5 — `effort` is an
+     * Opus/Sonnet/Fable-tier control, not a universal one. Blank omits the
+     * `output_config.effort` field from the request entirely rather than
+     * sending an empty string, which the API would also reject; see
+     * [com.secondbrain.agent.AgentLoop]'s use of this field.
+     */
     val effort: String = "high",
 
     @SerialName("max_tokens") val maxTokens: Long = 8_192,

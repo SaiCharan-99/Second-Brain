@@ -3,6 +3,10 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.kotlin.jvm) apply false
     alias(libs.plugins.kotlin.serialization) apply false
+    // Applied only by :app (Step 4). Declared `apply false` at the root so the
+    // version is resolved once, same pattern as the two plugins above.
+    alias(libs.plugins.kotlin.compose.compiler) apply false
+    alias(libs.plugins.jetbrains.compose) apply false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

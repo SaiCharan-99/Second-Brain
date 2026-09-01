@@ -60,6 +60,16 @@ import kotlin.random.Random
  * **Usage accounting.** `usage.inputTokens()` is the *uncached remainder only*.
  * Reading it as "the prompt cost" under-reports by whatever the cache served,
  * which is most of it in a healthy loop.
+ *
+ * D-067: [AgentConfig.baseUrl], when set, points this same SDK at anything
+ * that speaks the Anthropic Messages API wire format rather than
+ * `api.anthropic.com` — DeepSeek's `https://api.deepseek.com/anthropic` is
+ * the case this was built for. Nothing else in this file changes: the reason
+ * this works at all is that the wire format, not the vendor, is what this
+ * class actually depends on. Prompt caching still gets requested there; the
+ * server just ignores `cache_control` rather than rejecting it, so
+ * `agent.cache_enabled = false` in config.toml is what actually turns it off
+ * — see D-067's note on [CostMeter]'s cache-miss warning.
  */
 class ClaudeClient(
     private val config: AgentConfig,
@@ -71,6 +81,20 @@ class ClaudeClient(
         // attempt counting, so the SDK's own retries are disabled to avoid
         // multiplying them.
         .maxRetries(0)
+        .apply {
+            // D-066: only an identity-linked, multi-workspace key needs this.
+            // Measured live: omitting it on such a key is a 400
+            // ("anthropic-workspace-id is required..."), not a fallback to a
+            // default workspace, so this is never optional once one applies.
+            config.workspaceId?.takeIf { it.isNotBlank() }?.let { putHeader("anthropic-workspace-id", it) }
+            // D-067: blank keeps the SDK's own default (real Anthropic).
+            // Measured live against DeepSeek's compatible endpoint: a request
+            // with the wrong URL, key shape, or model string fails before
+            // this ever bills, and this combination reached actual billing
+            // (HTTP 402, insufficient balance) rather than a 400/404 — the
+            // request shape itself is correct.
+            config.baseUrl?.takeIf { it.isNotBlank() }?.let { baseUrl(it) }
+        }
         .build(),
 ) : LlmPort {
 

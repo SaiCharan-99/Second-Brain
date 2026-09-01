@@ -11,6 +11,10 @@ import com.secondbrain.model.VaultConfig
 import com.secondbrain.ports.VaultStore
 import com.secondbrain.ports.WriteResult
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -35,6 +39,28 @@ class Vault(
 ) : VaultStore, AutoCloseable {
 
     private val log = LoggerFactory.getLogger(Vault::class.java)
+
+    /**
+     * Ticks once after any vault mutation lands — our own writes and external
+     * edits picked up by the [FileWatcher] alike.
+     *
+     * ARCHITECTURE.md §7 Step 4 asks for "FileWatcher → UI state flow, so a
+     * capture on screen 1 appears on screen 2 with no restart." `:app` already
+     * learns about its own agent-driven writes synchronously, from the tool
+     * result — this is the signal for the case that has no other one: EC-N10,
+     * a note edited in an external editor while the dashboard is open.
+     *
+     * Content-free on purpose. A payload describing *what* changed would have
+     * to be kept in lock-step with every call site below, and a stale one is
+     * worse than none — the UI already knows how to re-query whatever it has
+     * selected, so a bare tick is the whole contract. `extraBufferCapacity`
+     * plus `DROP_OLDEST` means a burst of rapid changes (a multi-file external
+     * edit, an OVERFLOW rescan) coalesces into "something changed, look again"
+     * rather than backing up or suspending a mutation to wait for a slow
+     * collector — the vault write path must never block on the UI.
+     */
+    private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val changes: SharedFlow<Unit> = _changes.asSharedFlow()
 
     companion object {
         /**
@@ -145,6 +171,7 @@ class Vault(
     private suspend fun runWrite(body: suspend () -> VaultWriter.Outcome): WriteResult =
         try {
             val outcome = body()
+            _changes.tryEmit(Unit)
             WriteResult.Written(
                 path = outcome.path,
                 resolvedLinks = outcome.resolvedLinks,
@@ -229,11 +256,17 @@ class Vault(
                         scanner.rebuild()
                     }
                 }
+                // EC-N10 by way of an external editor is the one write path with
+                // no other signal to the UI - see the [_changes] doc comment.
+                // Our own writes already emit from runWrite; this covers the
+                // no-op re-index case too (harmless: an extra refresh of an
+                // unchanged screen), rather than trying to detect and skip it.
+                _changes.tryEmit(Unit)
             }
         }
     }
 
-    fun rebuildIndex(): VaultScanner.ScanReport = scanner.rebuild()
+    fun rebuildIndex(): VaultScanner.ScanReport = scanner.rebuild().also { _changes.tryEmit(Unit) }
 
     override fun close() {
         watcher?.close()

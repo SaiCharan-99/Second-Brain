@@ -24,12 +24,14 @@ data class AppConfig(
     val speech: SpeechConfig = SpeechConfig(),
     val vault: VaultConfig = VaultConfig(),
     val agent: AgentConfig = AgentConfig(),
+    val google: GoogleConfig = GoogleConfig(),
 ) {
     /** Safe to log. Secrets replaced, everything else intact. */
     fun redacted(): AppConfig = copy(
         stt = stt.copy(apiKey = MASK),
         tts = tts.copy(apiKey = tts.apiKey?.let { MASK }),
         agent = agent.redacted(),
+        google = google.redacted(),
     )
 
     companion object {
@@ -145,12 +147,21 @@ data class SttConfig(
 
 @Serializable
 data class TtsConfig(
-    val model: String,
-    val voice: String,
-    @SerialName("base_url") val baseUrl: String,
+    /**
+     * D-065: Gemini by default, superseding §7 Step 1's Kokoro assumption —
+     * measured against the live API before being wired in. `voice`/`base_url`
+     * default to Gemini's own values for the same reason `stt.base_url`
+     * already does; `KokoroTts` still exists in `:voice` and reads this same
+     * config shape if anyone points it at a self-hosted endpoint instead.
+     */
+    val model: String = "gemini-3.1-flash-tts-preview",
+    /** A Gemini prebuilt voice name (e.g. "Kore"), or a Kokoro voice id if using KokoroTts. */
+    val voice: String = "Kore",
+    @SerialName("base_url") val baseUrl: String = "https://generativelanguage.googleapis.com",
     @SerialName("api_key") val apiKey: String? = null,
-    /** Container Kokoro should return. Pinned by spike S1.2. */
+    /** KokoroTts only: the container it should return. Ignored by GeminiTts, which always gets raw PCM. */
     @SerialName("response_format") val responseFormat: String = "wav",
+    /** KokoroTts only: Gemini TTS has no speed parameter, only prompt phrasing. */
     val speed: Double = 1.0,
     @SerialName("max_attempts") val maxAttempts: Int = 3,
     @SerialName("initial_backoff_ms") val initialBackoffMs: Long = 500,
@@ -182,3 +193,39 @@ data class SpeechConfig(
     /** EC-T2: hard cap on spoken output. Truncate at a sentence boundary. */
     @SerialName("max_speech_seconds") val maxSpeechSeconds: Int = 60,
 )
+
+/**
+ * Google OAuth, for `email_draft` and the calendar tools (Steps 5-6).
+ *
+ * Optional, deliberately unlike `agent.api_key` and `stt`/`tts.api_key`: those
+ * are core-path (nothing works without Claude/Gemini), Google is opt-in. Blank
+ * [clientId]/[clientSecret] means `Main.kt` logs a warning and simply does not
+ * register the email/calendar tools rather than failing at startup — voice
+ * capture (Steps 3-4) keeps working with no Google account at all.
+ */
+@Serializable
+data class GoogleConfig(
+    @SerialName("client_id") val clientId: String = "",
+    @SerialName("client_secret") val clientSecret: String = "",
+    /**
+     * Loopback OAuth redirect port. 0 lets `LocalServerReceiver` pick a free
+     * port itself, which the "loopback IP address" flow Google's own current
+     * docs describe supports for a Desktop-app-type client — no fixed
+     * registered redirect URI needed. Set a fixed port only if your OAuth
+     * client was created before that flow existed and needs one registered.
+     */
+    @SerialName("redirect_port") val redirectPort: Int = 0,
+    /**
+     * Where the OAuth token pair lives. Its own tiny SQLite file, not app.db —
+     * see the Step 5/6 plan: `:integrations` cannot reach `:agent`'s AgentDb or
+     * `:vault`'s AppDb (no such dependency edge in §1), and this is a clean,
+     * non-precious sub-domain of its own (losing it just means one more consent
+     * screen). Supersedes ARCHITECTURE §2's placement of oauth_tokens in app.db.
+     */
+    @SerialName("token_store_path") val tokenStorePath: String = "oauth_tokens.db",
+) {
+    fun redacted(): GoogleConfig = copy(
+        clientId = if (clientId.isBlank()) clientId else AppConfig.MASK,
+        clientSecret = if (clientSecret.isBlank()) clientSecret else AppConfig.MASK,
+    )
+}

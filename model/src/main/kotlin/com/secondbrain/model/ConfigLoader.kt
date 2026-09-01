@@ -27,10 +27,19 @@ object ConfigLoader {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    /** Keys with no default. Absent from both file and env means hard failure. */
+    /**
+     * Keys with no default. Absent from both file and env means hard failure.
+     *
+     * D-065: `tts.model`/`tts.voice`/`tts.base_url` dropped off this list —
+     * `TtsConfig` now defaults all three to Gemini's own values, the same way
+     * `stt.base_url` already did, so a config with no `[tts]` section at all
+     * still loads. `tts.api_key` joins it: Gemini TTS genuinely needs a key,
+     * unlike the self-hosted Kokoro deployments this config shape also still
+     * supports, where a key was often absent entirely.
+     */
     private val required = listOf(
         "stt.model", "stt.api_key",
-        "tts.model", "tts.voice", "tts.base_url",
+        "tts.api_key",
     )
 
     fun load(
@@ -205,6 +214,8 @@ object ConfigLoader {
         // agent
         "max_tokens", "max_iterations", "max_tool_executions", "max_self_corrections",
         "context_window_turns", "cache_block_interval",
+        // google
+        "redirect_port",
     )
     private val knownDecimal = setOf(
         "energy_margin_db", "speed",

@@ -12,6 +12,8 @@ import com.secondbrain.ports.LlmPort
 import com.secondbrain.ports.LlmRequest
 import com.secondbrain.ports.LlmStop
 import org.slf4j.LoggerFactory
+import java.time.Instant
+import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -41,6 +43,14 @@ class AgentLoop(
     private val dispatcher: ToolDispatcher,
     private val prompts: SystemPrompt,
     private val config: AgentConfig,
+    /**
+     * Step 5/6: lets `CalendarTools` see "when this utterance was spoken"
+     * without changing every tool handler's signature. See [TurnClock]'s own
+     * doc. Defaulted so every existing call site (tests, `CaptureHarness`,
+     * pre-Step-5 code) keeps compiling unchanged with a private clock nobody
+     * else can observe.
+     */
+    private val turnClock: TurnClock = TurnClock(),
 ) {
 
     private val log = LoggerFactory.getLogger(AgentLoop::class.java)
@@ -56,8 +66,21 @@ class AgentLoop(
      *
      * Safe in Step 3 specifically: every vault write is atomic and serialised, so
      * a cancel between tools leaves no partial state, and no irreversible action
-     * exists yet. **Re-examine at Step 5** — cancelling with a proposal in flight
-     * is a ledger question, not a UX one.
+     * exists yet.
+     *
+     * **Re-examined at Step 5, as flagged above.** A cancel firing while a call
+     * is suspended inside `ConfirmationGate.submit` (an open proposal window) is
+     * safe for the same structural reason ask_user's indefinite wait already
+     * was: this flag is checked *between* calls in the `for (call in calls)`
+     * loop above, never during one, so a cancel does not touch a gate that is
+     * already open — the gate is a UI-driven state machine with its own
+     * lifecycle, not something this loop can reach into. If the *next* call in
+     * the same batch hasn't dispatched yet, it gets the standard "cancelled"
+     * tool_result and never opens; the gate already open keeps running until a
+     * human resolves it (or, if the app dies first, EC-A9's startup
+     * reconciliation resolves the orphaned ledger row instead). Nothing here
+     * needed to change for that to be true — it was already the right answer,
+     * just unverified until this comment.
      */
     class Cancellation {
         private val flag = AtomicBoolean(false)
@@ -71,6 +94,13 @@ class AgentLoop(
      * assistant does about it.
      *
      * @param history verbatim prior messages for this phase, already windowed.
+     * @param utteranceAt EC-C2: the recording's *start* instant (see
+     *   [com.secondbrain.model.Utterance.startedAt]'s own doc), not whenever
+     *   this function happens to be called. Defaulted to call-time for source
+     *   compatibility with existing tests and `CaptureHarness`, where there is
+     *   no real recording to time-stamp.
+     * @param zone EC-C3: the zone the utterance was spoken in, stored as an
+     *   ID and never a fixed offset.
      */
     suspend fun run(
         utterance: String,
@@ -79,11 +109,17 @@ class AgentLoop(
         conversationId: String,
         turnIndex: Int,
         cancellation: Cancellation = Cancellation(),
+        utteranceAt: Instant = Instant.now(),
+        zone: ZoneId = ZoneId.systemDefault(),
     ): TurnOutput {
         val started = System.currentTimeMillis()
+        turnClock.set(utteranceAt, zone)
 
         val messages = history.toMutableList()
-        messages += LlmMessage(LlmMessage.Role.USER, listOf(LlmBlock.Text(prompts.userTurn(utterance))))
+        messages += LlmMessage(
+            LlmMessage.Role.USER,
+            listOf(LlmBlock.Text(prompts.userTurn(utterance, now = utteranceAt, zone = zone))),
+        )
 
         val toolEvents = mutableListOf<ToolEvent>()
         var usage = TurnUsage.ZERO
@@ -94,7 +130,6 @@ class AgentLoop(
         var spokenText = ""
         var refusalCategory: String? = null
         var error: String? = null
-        var pendingGate: String? = null
 
         loop@ while (true) {
             if (cancellation.isCancelled()) {
@@ -165,7 +200,6 @@ class AgentLoop(
                         executions++
 
                         if (dispatched.needsSelfCorrection) correctionThisIteration = true
-                        dispatched.gatedToolName?.let { pendingGate = it }
 
                         if (executions >= config.maxToolExecutions) {
                             log.warn("Tool execution cap ({}) hit mid-iteration.", config.maxToolExecutions)
@@ -196,12 +230,15 @@ class AgentLoop(
                         }
                     }
 
-                    if (pendingGate != null) {
-                        // Step 5 suspends here for the ConfirmationGate. Step 3
-                        // registers no gated tools, so this is unreachable; leaving
-                        // the branch explicit beats discovering it is missing later.
-                        log.info("Gated tool '{}' pending; the loop would suspend here from Step 5.", pendingGate)
-                    }
+                    // Since Step 5: no separate branch needed here for a gated
+                    // call. dispatcher.dispatch(call) above already ran the
+                    // gated handler to completion — including, for
+                    // email_draft/calendar_propose_event, suspending inside
+                    // ConfirmationGate.submit() until a human resolved it. The
+                    // tool_result already reflects the outcome (sent, failed,
+                    // unknown, cancelled_by_user, or gate_busy). See
+                    // ConfirmationGate's doc for why this loop needs no
+                    // special-casing at all to make R2 hold.
                 }
 
                 LlmStop.END_TURN -> {
@@ -282,7 +319,9 @@ class AgentLoop(
         tools = if (toolsEnabled) registry.specs() else emptyList(),
         maxTokens = config.maxTokens,
         thinkingEnabled = config.thinkingEnabled,
-        effort = config.effort,
+        // D-066: effort is Opus/Sonnet/Fable-tier only and a 400 on Haiku.
+        // Blank means "omit the field", never "send an empty effort string".
+        effort = config.effort.takeIf { it.isNotBlank() },
         cacheSystemPrefix = config.cacheEnabled,
         cacheMessageBreakpoints = if (config.cacheEnabled) breakpoints(messages) else emptySet(),
     )
