@@ -1,10 +1,14 @@
 package com.secondbrain.agent
 
 import com.secondbrain.model.CalendarProposal
+import com.secondbrain.model.Cart
+import com.secondbrain.model.CartLine
 import com.secondbrain.model.EmailProposal
 import com.secondbrain.model.FieldKind
 import com.secondbrain.model.LedgerKind
 import com.secondbrain.model.LedgerState
+import com.secondbrain.model.Money
+import com.secondbrain.model.OrderProposal
 import com.secondbrain.model.Proposal
 import com.secondbrain.model.ProposalField
 import kotlinx.coroutines.CoroutineStart
@@ -108,6 +112,31 @@ class ConfirmationGateTest {
             assertEquals(ConfirmationGate.Stage.READY, g.state.value!!.stage)
             g.confirmExecute(id)
             assertTrue(result.await() is ConfirmationGate.GateOutcome.Executed)
+        }
+
+        @Test
+        @DisplayName("D-101: an order proposal (no fields at all - EC-Z15) is executable on the very first click, no Approve step")
+        fun `an order proposal opens straight at READY`(@TempDir dir: Path) = runTest {
+            val g = gate(dir)
+            val cart = Cart(lines = listOf(CartLine("l1", "p1", "Bread", "400 g", Money.ofRupees(45), 1)))
+            val proposal = OrderProposal(cart = cart, speechSummary = "1 item, 45 rupees, cash on delivery.")
+
+            val result = async(start = CoroutineStart.UNDISPATCHED) {
+                g.submit(LedgerKind.ORDER_PLACE, proposal, emptyList()) { _, _ -> ConfirmationGate.ExecutorResult.Success("ORD-1") }
+            }
+            val id = g.state.value!!.proposalId
+
+            // The actual bug this regression test exists for: before D-101,
+            // this was Stage.CONTENT_REVIEW, ProposalWindow's "Place order"
+            // button was shown anyway (its own Actions() comment says orders
+            // skip straight to the committing button), and confirmExecute()'s
+            // `stage != Stage.READY` guard made every click a silent no-op.
+            assertEquals(ConfirmationGate.Stage.READY, g.state.value!!.stage)
+
+            g.confirmExecute(id)
+            val outcome = result.await()
+            assertTrue(outcome is ConfirmationGate.GateOutcome.Executed)
+            assertEquals("ORD-1", (outcome as ConfirmationGate.GateOutcome.Executed).externalId)
         }
     }
 

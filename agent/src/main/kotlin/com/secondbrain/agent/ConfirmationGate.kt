@@ -199,7 +199,17 @@ class ConfirmationGate(
             proposalId = proposalId,
             proposal = proposal,
             fields = fields,
-            stage = Stage.CONTENT_REVIEW,
+            // D-101: a proposal with no editable fields - today only
+            // OrderProposal, per EC-Z15's "a cart line is not an editable
+            // string" - has nothing for an Approve click to do, so it opens
+            // straight at READY. Hardcoding CONTENT_REVIEW here unconditionally
+            // was a real bug: ProposalWindow's Actions() already shows the
+            // "Place order" button at CONTENT_REVIEW too (its own comment says
+            // "an order has nothing to review... goes straight to the
+            // committing button"), but confirmExecute() only ever acts from
+            // Stage.READY, so the button was clickable and silently did
+            // nothing - forever, for every order, since Step 7 shipped.
+            stage = if (fields.isEmpty()) Stage.READY else Stage.CONTENT_REVIEW,
             validationError = validator(proposal),
             conflictWarning = conflictWarning,
         )
