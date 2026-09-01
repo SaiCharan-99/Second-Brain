@@ -13,6 +13,9 @@ sqlite              = "3.53.4.0"
 # Pinned to the version transliteration was validated against (D-029). Any-Latn
 # on Telugu/Devanagari was verified before this dependency was accepted.
 icu4j               = "77.1"
+# D-096: Stage 2's camera backend. Bundled pure-Java default driver - no
+# OpenCV, no separate native install on Windows.
+webcamCapture       = "0.3.12"
 # Official Anthropic SDK for the JVM. Kotlin uses the Java SDK. Supersedes
 # ARCHITECTURE.md section 7's "Ktor" for the Claude transport - see D-044.
 anthropic           = "2.59.0"
@@ -50,6 +53,7 @@ ktor-client-mock                = { module = "io.ktor:ktor-client-mock",        
 
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
 icu4j       = { module = "com.ibm.icu:icu4j",      version.ref = "icu4j" }
+webcam-capture = { module = "com.github.sarxos:webcam-capture", version.ref = "webcamCapture" }
 anthropic   = { module = "com.anthropic:anthropic-java", version.ref = "anthropic" }
 
 slf4j-api        = { module = "org.slf4j:slf4j-api",         version.ref = "slf4j" }

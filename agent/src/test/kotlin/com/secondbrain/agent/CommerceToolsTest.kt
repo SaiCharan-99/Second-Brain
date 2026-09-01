@@ -10,6 +10,7 @@ import com.secondbrain.model.FolderVerdict
 import com.secondbrain.model.Money
 import com.secondbrain.model.Note
 import com.secondbrain.model.NoteDraft
+import com.secondbrain.model.NoteSource
 import com.secondbrain.model.OrderOutcome
 import com.secondbrain.model.OrderProposal
 import com.secondbrain.model.Product
@@ -132,9 +133,10 @@ class CommerceToolsTest {
         commerce: FakeCommerce,
         config: CommerceConfig = CommerceConfig(enabled = true, orderCeilingInr = 2_000),
         vault: VaultStore = RecordingVault(),
+        turnClock: TurnClock = TurnClock(),
     ): Triple<ToolDispatcher, ConfirmationGate, CommerceTools> {
         val gate = newGate(dir)
-        val tools = CommerceTools(commerce, gate, config, vault)
+        val tools = CommerceTools(commerce, gate, config, vault, turnClock)
         val registry = tools.register(ToolRegistry.builder()).build()
         return Triple(ToolDispatcher(registry), gate, tools)
     }
@@ -168,6 +170,29 @@ class CommerceToolsTest {
         assertEquals(1, vault.written.size)
         assertEquals("Lists", vault.written.single().folder)
         assertTrue(vault.written.single().bodyMarkdown.contains("2 kg onions"))
+    }
+
+    @Test
+    @DisplayName("D-092: a list saved from a photographed turn is recorded with IMAGE provenance, not VOICE")
+    fun `save list from an image turn records IMAGE source`(@TempDir dir: Path) = runTest {
+        val vault = RecordingVault()
+        val turnClock = TurnClock().apply { set(java.time.Instant.now(), java.time.ZoneId.systemDefault(), hasImage = true) }
+        val (dispatcher, _, _) = setup(dir, FakeCommerce(), vault = vault, turnClock = turnClock)
+
+        call(dispatcher, "commerce_save_list", """{"items":["bread"]}""")
+
+        assertEquals(NoteSource.IMAGE, vault.written.single().source)
+    }
+
+    @Test
+    @DisplayName("a voice-only turn (the default) still records VOICE provenance, unchanged from before D-092")
+    fun `save list from a voice turn still records VOICE source`(@TempDir dir: Path) = runTest {
+        val vault = RecordingVault()
+        val (dispatcher, _, _) = setup(dir, FakeCommerce(), vault = vault)
+
+        call(dispatcher, "commerce_save_list", """{"items":["bread"]}""")
+
+        assertEquals(NoteSource.VOICE, vault.written.single().source)
     }
 
     @Test

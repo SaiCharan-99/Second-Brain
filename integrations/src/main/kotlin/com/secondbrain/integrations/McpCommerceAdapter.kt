@@ -300,14 +300,31 @@ class McpCommerceAdapter(
      * tool, a failed store selection, a transport error, and a genuine zero
      * matches were one indistinguishable outcome, and `CommerceTools` told
      * the user *"nothing matched"* for all four. Only the last one is that.
+     *
+     * D-095: retries exactly once, only on [McpClient.McpError.SessionLost],
+     * only here and in [readCart] — both are idempotent reads, where a blind
+     * retry is safe by construction. Never for a mutation: EC-Z18's whole
+     * point is that a lost response after a *write* is genuinely ambiguous
+     * (it may have applied), so [writeCart]/[placeOrder] keep reporting
+     * [CartMutation.Unknown]/[OrderOutcome.Unknown] and never retry
+     * themselves — only the caller, by looking, may act again.
      */
     override suspend fun search(query: String, limit: Int): SearchOutcome {
+        val (outcome, sessionLost) = searchOnce(query, limit)
+        if (!sessionLost) return outcome
+        log.info("Session expired mid-search; re-initializing once and retrying.")
+        return searchOnce(query, limit).first
+    }
+
+    /** @return the outcome, and whether it failed specifically because the MCP session was lost (D-095's retry signal). */
+    private suspend fun searchOnce(query: String, limit: Int): Pair<SearchOutcome, Boolean> {
         val tool = toolFor(Role.SEARCH)
-            ?: return SearchOutcome.ProviderError("Zepto's search tool could not be found.")
+            ?: return SearchOutcome.ProviderError("Zepto's search tool could not be found.") to false
 
         ensureStoreSelected().let {
             if (it is McpClient.McpResult.Err) {
-                return SearchOutcome.ProviderError("Couldn't set a delivery location: ${it.error.readable()}")
+                val lost = it.error is McpClient.McpError.SessionLost
+                return SearchOutcome.ProviderError("Couldn't set a delivery location: ${it.error.readable()}") to lost
             }
         }
 
@@ -320,7 +337,12 @@ class McpCommerceAdapter(
         return when (val result = client.callTool(tool, args)) {
             is McpClient.McpResult.Err -> {
                 log.warn("Search failed: {}", result.error)
-                SearchOutcome.ProviderError(result.error.readable())
+                val lost = result.error is McpClient.McpError.SessionLost
+                // Same reasoning as the string-matched branch below: the
+                // store selection this object remembers is only valid for
+                // the session it was made on.
+                if (lost) selectedAddressId = null
+                SearchOutcome.ProviderError(result.error.readable()) to lost
             }
             is McpClient.McpResult.Ok -> {
                 if (McpClient.isToolError(result.value)) {
@@ -328,7 +350,9 @@ class McpCommerceAdapter(
                     log.warn("Search tool reported an error: {}", message)
                     // Zepto's own tool-level errors are things like "Store
                     // not selected" - a real failure, not "nothing matched
-                    // this query". Session loss surfaces the same way here.
+                    // this query". A string match, not a typed McpError, so
+                    // this cannot drive the typed sessionLost retry signal
+                    // above - it only clears the cached store selection.
                     if (message.contains("session", ignoreCase = true) || message.contains("store", ignoreCase = true)) {
                         // D-091: a store selection lives on the MCP session,
                         // not on this object. Resetting the client's session
@@ -339,10 +363,10 @@ class McpCommerceAdapter(
                         client.resetSession()
                         selectedAddressId = null
                     }
-                    return SearchOutcome.ProviderError(message.take(300))
+                    return SearchOutcome.ProviderError(message.take(300)) to false
                 }
                 val products = parseProducts(payloadOf(result.value)).take(limit)
-                if (products.isEmpty()) SearchOutcome.NoMatch else SearchOutcome.Found(products)
+                (if (products.isEmpty()) SearchOutcome.NoMatch else SearchOutcome.Found(products)) to false
             }
         }
     }
@@ -420,14 +444,31 @@ class McpCommerceAdapter(
 
     // ── cart read ───────────────────────────────────────────────────────────
 
+    /** D-095: retries once on a lost session — see [search]'s doc for why this is safe only for reads. */
     override suspend fun readCart(): Cart {
-        val tool = toolFor(Role.CART_VIEW) ?: return Cart()
-        ensureStoreSelected().let { if (it is McpClient.McpResult.Err) { log.warn("Store selection failed: {}", it.error); return Cart() } }
+        val (cart, sessionLost) = readCartOnce()
+        if (!sessionLost) return cart
+        log.info("Session expired mid-read; re-initializing once and retrying.")
+        return readCartOnce().first
+    }
+
+    private suspend fun readCartOnce(): Pair<Cart, Boolean> {
+        val tool = toolFor(Role.CART_VIEW) ?: return Cart() to false
+        ensureStoreSelected().let {
+            if (it is McpClient.McpResult.Err) {
+                log.warn("Store selection failed: {}", it.error)
+                val lost = it.error is McpClient.McpError.SessionLost
+                if (lost) selectedAddressId = null
+                return Cart() to lost
+            }
+        }
 
         return when (val result = client.callTool(tool, JsonObject(emptyMap()))) {
             is McpClient.McpResult.Err -> {
                 log.warn("Cart read failed: {}", result.error)
-                Cart()
+                val lost = result.error is McpClient.McpError.SessionLost
+                if (lost) selectedAddressId = null
+                Cart() to lost
             }
             is McpClient.McpResult.Ok -> {
                 val cart = runCatching { parseCart(payloadOf(result.value)) }.getOrNull() ?: Cart()
@@ -440,7 +481,7 @@ class McpCommerceAdapter(
                         log.info("Cart already had {} line(s) before this session.", preExistingLineIds.size)
                     }
                 }
-                cart.copy(lines = cart.lines.map { it.copy(addedThisSession = it.lineId !in preExistingLineIds) })
+                cart.copy(lines = cart.lines.map { it.copy(addedThisSession = it.lineId !in preExistingLineIds) }) to false
             }
         }
     }

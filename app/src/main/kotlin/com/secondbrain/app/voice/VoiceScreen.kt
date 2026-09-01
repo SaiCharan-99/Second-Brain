@@ -337,16 +337,26 @@ private fun ImageCaptureRow(state: VoiceController.UiState, controller: VoiceCon
     val scope = rememberCoroutineScope()
 
     if (state.pendingImageLabel == null) {
-        AssistChip(
-            onClick = {
-                scope.launch {
-                    val path = withContext(Dispatchers.IO) { ImageIntake.pickFile() }
-                    if (path != null) controller.attachImage(path)
-                }
-            },
-            label = { Text("Attach a photo") },
-            colors = AssistChipDefaults.assistChipColors(labelColor = AppColors.Blue),
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AssistChip(
+                onClick = {
+                    scope.launch {
+                        val path = withContext(Dispatchers.IO) { ImageIntake.pickFile() }
+                        if (path != null) controller.attachImage(path)
+                    }
+                },
+                label = { Text("Attach a photo") },
+                colors = AssistChipDefaults.assistChipColors(labelColor = AppColors.Blue),
+            )
+            // Stage 2/D-096. A second, independent way in - the file picker
+            // above is untouched and stays the fallback the plan itself asks
+            // for if a camera turns out not to work.
+            AssistChip(
+                onClick = { controller.openCameraWindow() },
+                label = { Text("Take a photo") },
+                colors = AssistChipDefaults.assistChipColors(labelColor = AppColors.Blue),
+            )
+        }
         return
     }
 

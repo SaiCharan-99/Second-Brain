@@ -1449,3 +1449,67 @@ The fix is a one-token change (`"add"` → `"add_"`) rather than switching `best
 **Uncertain:** `SearchOutcome.ProviderError`'s reason string is whatever `McpClient.McpError`/Zepto's own tool-error text says — readable enough for a log, not yet tuned for what should be *spoken*. `CommerceTools`' current instruction ("tell the user what went wrong") trusts the model to phrase it well; an EC-Z1-style "next step" table mapping specific provider errors to specific spoken sentences would be more deterministic (R1's own preference) but is not built.
 
 **Files:** `model/src/main/kotlin/com/secondbrain/model/Commerce.kt`, `ports/src/main/kotlin/com/secondbrain/ports/CommercePort.kt`, `integrations/src/main/kotlin/com/secondbrain/integrations/McpCommerceAdapter.kt`, `integrations/src/main/kotlin/com/secondbrain/integrations/FakeCommerceAdapter.kt`, `integrations/src/test/kotlin/com/secondbrain/integrations/FakeCommerceAdapterTest.kt`, `agent/src/main/kotlin/com/secondbrain/agent/CommerceTools.kt`, `agent/src/test/kotlin/com/secondbrain/agent/CommerceToolsTest.kt`.
+
+## D-092 — `TurnClock` also carries whether this turn attached a photo; `NoteSource.IMAGE` was defined in Step 3 and never once set
+
+**Date:** 2026-09-01
+
+**Decided:** `TurnClock` gains `hasImage: Boolean`, set by `AgentLoop.run` alongside `current` from the same `images` parameter WF-6/Step 8 introduced. `VaultTools`/`CommerceTools` take a `TurnClock` (defaulted, matching every other optional collaborator in this codebase) and read `turnClock.hasImage` when building a `NoteDraft`, instead of hardcoding `source = NoteSource.VOICE`.
+
+**Why:** `NoteSource.IMAGE` has existed in `model/Utterance.kt` since Step 3's original three-value enum and had never once been assigned by any code path — every note or saved list ever written by this app, photographed or not, was recorded as a voice note. Found while verifying the same relayed plan that surfaced D-090; checked directly (`grep NoteSource\\.` across the tool handlers) before being treated as real, same as D-090/D-091.
+
+`TurnClock` rather than a new parameter on every tool handler's fixed `suspend (String) -> ToolOutcome` signature, for the identical reason `TurnClock.current` already exists: one small per-turn object `AgentLoop` sets once and handlers read, not a signature change rippling through every registered tool.
+
+**Uncertain:** Whether provenance should also distinguish a *hand-typed* source (`request_typed_input`) from voice — `NoteSource` only has three values and nothing routes through `TEXT` today either. Out of scope for this fix, which only closes the gap the relayed plan actually found.
+
+**Files:** `agent/src/main/kotlin/com/secondbrain/agent/TurnClock.kt`, `agent/src/main/kotlin/com/secondbrain/agent/AgentLoop.kt`, `agent/src/main/kotlin/com/secondbrain/agent/VaultTools.kt`, `agent/src/main/kotlin/com/secondbrain/agent/CommerceTools.kt`, `agent/src/test/kotlin/com/secondbrain/agent/CommerceToolsTest.kt`, `app/src/main/kotlin/com/secondbrain/app/Main.kt`, `app/src/main/kotlin/com/secondbrain/app/CaptureHarness.kt`.
+
+## D-093 — The MCP transport stays hand-rolled; the plan's proposed migration to the official Kotlin MCP SDK is declined, for now
+
+**Date:** 2026-09-01
+
+**Decided:** `McpClient`/`McpOAuth` (D-079/D-089) are not being replaced with `modelcontextprotocol/kotlin-sdk`. Revisit only if a concrete capability gap surfaces that the current client cannot satisfy.
+
+**Why:** CLAUDE.md: *"Push back when the design is wrong. Including when it is a design in this file."* That instruction applies exactly as much to a design arriving from outside this file. The relayed plan proposed this migration with no failure of the current client cited — and the current client is, as of tonight, the single most *validated* piece of Step 7: real OAuth 2.1 + PKCE + DCR sign-in against Zepto's actual authorization server, a real `tools/list` against the real 23 tools, real `tools/call` round trips returning real search results and a real address list, SSE and plain-JSON response parsing both exercised. Swapping it for an unevaluated library, with no demonstrated deficiency driving the change, is exactly the "unvalidated dependency stacked on an unvalidated dependency" CLAUDE.md's "one unknown at a time" rule exists to prevent — doubly so arriving in the same session where D-090 showed that even *this* codebase's own hand-verified work can hide a one-token bug for a full day undetected. A transport swap is the highest-blast-radius, lowest-demonstrated-need item in the whole plan.
+
+**Uncertain:** Whether the official SDK's OAuth support, streamable-HTTP handling, or SSE parsing is actually more robust than the ~400 lines this project already has — genuinely unknown, because it has not been evaluated, which is the entire point: nothing here is a claim that the hand-rolled client is *better*, only that switching away from a working, tested one for an untested one, unprompted by any actual failure, is not a decision this project's own stated discipline supports making blind.
+
+**Files:** none (a decision to leave `integrations/src/main/kotlin/com/secondbrain/integrations/McpClient.kt` / `McpOAuth.kt` unchanged).
+
+## D-094 — A grocery comparison table is R9's third sanctioned exception, scoped to *browsing and selecting a candidate*, never to approving an order
+
+**Date:** 2026-09-01
+
+**Decided:** R9 permits exactly two exceptions to speech-in/speech-out — verbatim fields and confirmation clicks — and says *"any change that adds a third goes in DECISIONS.md with a justification."* This is that entry. A third exception is added: **comparing several candidate products for one grocery item, and picking one, may happen by looking at a table and clicking a row**, when more than a handful of candidates exist. It does not extend to anything past that: quantity is still confirmable by voice, the cart is still read back and revisable by speech (D-080's `RevisionRequested`), and placing the order is still, unconditionally, `ConfirmationGate`'s existing click — this exception touches *selection among options Claude already found*, nothing downstream of it.
+
+**Why:** WF-4's existing design already reads one candidate aloud, waits for yes/no, and reads the next on "no" — fine for one item, and unworkable for what Stage 4 actually needs: ten ranked candidates *per grocery category*, each with name, pack size, price, MRP, discount and availability. Read aloud, that is on the order of sixty spoken facts before a single item is chosen, for every item on the list — the same "browsing is a bad fit for pure speech" argument this project already accepted once, implicitly, when Step 4 built a whole visual Vault dashboard rather than a spoken note-browser. A comparison table is that same argument applied to commerce: `search` already returns structured data (D-091's `SearchOutcome.Found(products)`) *for the model* to reason over — rendering the same data as a table for the *person* to glance at and click, rather than making them sit through it read aloud, is presenting existing structured output differently, not asking the model to do anything new.
+
+Boundaries, deliberately: this is a *selection* exception, not a general "shopping can now be visual" exception. R2's whole safety model — no direct-execution tool for an irreversible action, the human click that actually commits — is untouched, because choosing *which* candidate is not the irreversible step; ordering it still is.
+
+**Uncertain:** The exact interaction shape (a Compose table inline in the transcript vs. a separate pane) is a Stage 4 UI decision, not decided here — this entry authorizes that *a visual, click-driven comparison view is allowed to exist at all*, which is the R9-level permission that has to be on record before any of that UI gets built, not the UI's design itself.
+
+**Files:** none yet (a standing authorization for Stage 4's UI work, not a code change).
+
+## D-095 — `search`/`readCart` retry once on a lost MCP session; mutations never do
+
+**Date:** 2026-09-01
+
+**Decided:** `McpCommerceAdapter.search` and `.readCart` each retry exactly once when the failure was specifically `McpClient.McpError.SessionLost` — re-initializing (the client already does this automatically inside `ensureInitialized()`) and re-selecting a store before the retry. A session-lost result also clears `selectedAddressId`, matching D-091's reasoning: the store selection lives on the session, not on this object, so a session reset without forgetting the cached address id would leave the retry believing a store was still selected on a session that had never selected one. `writeCart`/`placeOrder` are explicitly excluded — no retry, ever.
+
+**Why:** The plan flagged "session expiry is not recovered correctly for safe read operations," and it was right: before this, a mid-session expiry surfaced as a plain `ProviderError`/empty `Cart()` with no attempt to recover, even though the fix (re-initialize, re-select, try again) is both obvious and safe for a read. It is *not* safe for a write, which is exactly why this is two narrow, explicit retries rather than a general retry wrapper: EC-Z18's entire point is that a lost response after `update_cart`/`create_order` is genuinely ambiguous about whether it applied, so those two keep reporting `Unknown` and rely on the caller re-reading rather than ever retrying blind.
+
+**Uncertain:** `readCart`'s error path still collapses every failure to a bare, empty `Cart()` — the same "distinguishable outcome" problem D-091 fixed for `search` exists here too and is not fixed by this entry; scoped out because `commerce_cart_view`'s current callers already handle an unexpectedly-empty cart reasonably, unlike `search`'s "nothing matched" framing, which was actively misleading. Worth its own pass later.
+
+**Files:** `integrations/src/main/kotlin/com/secondbrain/integrations/McpCommerceAdapter.kt`.
+
+## D-096 — Camera library for WF-6's capture window: Sarxos Webcam Capture, JavaCV as the fallback
+
+**Date:** 2026-09-01
+
+**Decided:** `com.github.sarxos:webcam-capture:0.3.12` (MIT) is the camera backend for Stage 2's capture window. `Webcam.getWebcams()` enumerates devices, `Webcam.getImage()` returns a `BufferedImage` directly (feeding straight into the existing `ImageIntake.downscale`/`toJpegBytes` pipeline from D-084 with no new conversion code), `WebcamPanel` (a `javax.swing.JPanel`) gives a live preview embeddable in Compose Desktop via `SwingPanel`, and `.close()` releases the device. Ships a bundled pure-Java default driver — no OpenCV, no separate native driver install on Windows. Fallback: `org.bytedeco:javacv-platform` (Apache 2.0 license option) if a specific camera the default driver cannot see turns up.
+
+**Why:** Researched rather than taken from the plan's own suggestion on faith — the plan named "Kamera," and checking it directly found real problems for this use case: `Kashif-E/CameraK`'s desktop target is real (JavaCV-backed) but its public API is mobile-first (`CameraLens.BACK`, `takePictureToFile()`) with no documented multi-camera enumeration or plain-`BufferedImage` capture, both hard requirements here. Sarxos's API maps onto every requirement directly with no adaptation, is a known quantity in production Java desktop software despite an old formal release tag (0.3.12, 2016) — commit history running into November 2025 shows it is maintained, not abandoned, the old tag is just infrequent releases against a stable API. JavaCV is real and actively released (1.5.14, Aug 2026) but lower-level (no built-in enumeration or preview widget) and meaningfully heavier as a native payload (OpenCV+FFmpeg bundled) for a capability this app only needs at "open, grab one frame, close."
+
+**Uncertain:** Whether this laptop *has* a usable webcam at all — checked next, before any UI is built on top of this choice, per the plan's own instruction to spike the backend "on the target laptop" rather than assume.
+
+**Files:** none yet (library decision only; the dependency and the actual device spike follow immediately).

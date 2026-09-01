@@ -63,6 +63,8 @@ class CommerceTools(
     private val config: CommerceConfig,
     /** EC-Z1: the parsed list is written here before any commerce call, so an outage never loses it. */
     private val vault: VaultStore,
+    /** D-092: was a photo attached to this turn — see [TurnClock.hasImage]. */
+    private val turnClock: TurnClock = TurnClock(),
 ) {
     private val log = LoggerFactory.getLogger(CommerceTools::class.java)
     private val json = Json { ignoreUnknownKeys = true }
@@ -103,7 +105,8 @@ class CommerceTools(
             tags = listOf("grocery", "list"),
             summary = "${items.size} items to buy.",
             bodyMarkdown = items.joinToString("\n") { "- $it" },
-            source = NoteSource.VOICE,
+            // D-092: a photographed grocery list was recorded as a voice note.
+            source = if (turnClock.hasImage) NoteSource.IMAGE else NoteSource.VOICE,
         )
 
         // confirmNew = true: a weekly shop legitimately repeats last week's

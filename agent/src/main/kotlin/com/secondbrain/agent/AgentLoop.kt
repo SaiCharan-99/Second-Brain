@@ -119,7 +119,7 @@ class AgentLoop(
         images: List<LlmBlock.Image> = emptyList(),
     ): TurnOutput {
         val started = System.currentTimeMillis()
-        turnClock.set(utteranceAt, zone)
+        turnClock.set(utteranceAt, zone, hasImage = images.isNotEmpty())
 
         val messages = history.toMutableList()
         val userBlocks: List<LlmBlock> = images + LlmBlock.Text(prompts.userTurn(utterance, now = utteranceAt, zone = zone))

@@ -95,11 +95,11 @@ fun main(args: Array<String>) = runBlocking {
         // ask_user cannot work from a file, so it reports no answer rather than
         // pretending. The loop already handles that honestly (H11), and a harness
         // that silently invented answers would corrupt the placement measurement.
-        val tools = VaultTools(vault, appConfig.vault) { question ->
+        val tools = VaultTools(vault, appConfig.vault, askUser = { question ->
             println("   [ask_user] $question")
             println("   [ask_user] no answer available in the harness")
             VaultTools.AskResult.NoAnswer("running from a file; nobody is listening")
-        }
+        })
 
         val registry = tools.register(ToolRegistry.builder()).build()
         val loop = AgentLoop(llm, registry, ToolDispatcher(registry), prompts, agentConfig)

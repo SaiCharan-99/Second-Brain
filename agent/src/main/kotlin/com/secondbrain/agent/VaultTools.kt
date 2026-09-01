@@ -45,6 +45,8 @@ class VaultTools(
      * of the twelve iterations (H11 / D-055).
      */
     private val askUser: suspend (question: String) -> AskResult,
+    /** D-092: was a photo attached to this turn — see [TurnClock.hasImage]. */
+    private val turnClock: TurnClock = TurnClock(),
 ) {
 
     private val log = LoggerFactory.getLogger(VaultTools::class.java)
@@ -203,7 +205,10 @@ class VaultTools(
             tags = obj["tags"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
             summary = obj["summary"]?.jsonPrimitive?.content ?: "",
             bodyMarkdown = obj["body"]?.jsonPrimitive?.content ?: "",
-            source = NoteSource.VOICE,
+            // D-092: was hardcoded VOICE regardless of what actually produced
+            // the turn - WF-6's photo-capture notes were recorded as voice
+            // notes, silently wrong provenance.
+            source = if (turnClock.hasImage) NoteSource.IMAGE else NoteSource.VOICE,
         )
         val confirmNew = obj["confirm_new"]?.jsonPrimitive?.content?.toBoolean() ?: false
 

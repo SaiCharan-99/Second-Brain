@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import com.secondbrain.agent.ConfirmationGate
 import com.secondbrain.app.vault.VaultBrowserController
 import com.secondbrain.app.vault.VaultScreen
+import com.secondbrain.app.voice.CameraWindow
 import com.secondbrain.app.voice.ProposalWindow
 import com.secondbrain.app.voice.TypedInputOverlay
 import com.secondbrain.app.voice.VoiceController
@@ -74,6 +75,9 @@ fun App(
             // nothing when there is nothing pending.
             ProposalWindow(confirmationGate, calendarPort)
             TypedInputOverlay(voiceController)
+            // Stage 2/D-096: same overlay pattern - renders nothing unless
+            // VoiceController.UiState.cameraWindowOpen is true.
+            CameraWindow(voiceController)
         }
     }
 }

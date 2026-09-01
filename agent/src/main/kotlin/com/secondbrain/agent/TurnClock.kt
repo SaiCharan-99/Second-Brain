@@ -28,7 +28,21 @@ class TurnClock {
     var current: Moment = Moment(Instant.EPOCH, ZoneId.systemDefault())
         private set
 
-    fun set(at: Instant, zone: ZoneId) {
+    /**
+     * D-092: whether the turn now running attached a photo. Same mechanism,
+     * same reasoning as [current] — `VaultTools.writeNote`/`CommerceTools`'s
+     * list-saving handler both hardcoded `NoteSource.VOICE` regardless of
+     * what actually produced the turn, because neither had any way to know.
+     * [AgentLoop.run] sets this alongside [current], from the same `images`
+     * parameter WF-6/Step 8 introduced; the tool handlers read it once, at
+     * the point they build a `NoteDraft`, and forget it again next turn.
+     */
+    @Volatile
+    var hasImage: Boolean = false
+        private set
+
+    fun set(at: Instant, zone: ZoneId, hasImage: Boolean = false) {
         current = Moment(at, zone)
+        this.hasImage = hasImage
     }
 }

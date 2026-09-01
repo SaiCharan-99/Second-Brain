@@ -145,6 +145,8 @@ class VoiceController(
         val commerceSignedIn: Boolean = false,
         /** Step 8/WF-6: filename of a photo attached and waiting to go out with the next turn. */
         val pendingImageLabel: String? = null,
+        /** Stage 2/D-096: whether [CameraWindow] should be showing. */
+        val cameraWindowOpen: Boolean = false,
     )
 
     private val _state = MutableStateFlow(
@@ -329,6 +331,40 @@ class VoiceController(
         }
         pendingImage = PendingImage(path.fileName.toString(), block)
         _state.update { it.copy(pendingImageLabel = path.fileName.toString(), statusLine = "") }
+    }
+
+    // ── Stage 2/D-096: the camera window ────────────────────────────────────
+
+    fun openCameraWindow() {
+        _state.update { it.copy(cameraWindowOpen = true) }
+    }
+
+    fun closeCameraWindow() {
+        _state.update { it.copy(cameraWindowOpen = false) }
+    }
+
+    /**
+     * [CameraWindow] hands a captured frame here on "Use photo" rather than
+     * calling [attachImage] itself, so the file-write and the pending-image
+     * bookkeeping stay in one place regardless of which UI produced the
+     * image — [CameraWindow] never touches [pendingImage] directly.
+     */
+    fun attachCapturedFrame(frame: java.awt.image.BufferedImage) {
+        val tempFile = java.nio.file.Files.createTempFile("camera-capture-", ".jpg")
+        try {
+            javax.imageio.ImageIO.write(frame, "jpg", tempFile.toFile())
+            attachImage(tempFile)
+        } catch (e: Exception) {
+            log.warn("Could not save the captured frame: {}", e.message)
+            _state.update { it.copy(statusLine = "Couldn't use that photo: ${e.message}") }
+        } finally {
+            // The bytes are already re-encoded into pendingImage's base64
+            // block by attachImage() -> ImageIntake.encodeForVision by this
+            // point; the temp file was only ever a bridge to reuse that
+            // existing pipeline unchanged, not something worth keeping.
+            runCatching { java.nio.file.Files.deleteIfExists(tempFile) }
+        }
+        closeCameraWindow()
     }
 
     fun clearPendingImage() {

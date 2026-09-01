@@ -41,6 +41,8 @@ dependencies {
 
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
+    // D-096: Stage 2's camera backend (WF-6 capture window).
+    implementation(libs.webcam.capture)
     // No icon-font dependency. compose.materialIconsExtended is pinned to a
     // 1.7.3 snapshot that will not receive updates (a real warning, not a
     // guess - it printed on the first resolve). The design board's own
@@ -82,6 +84,16 @@ tasks.register<JavaExec>("capture") {
 // McpCommerceAdapter's role bindings and response parsers can be checked
 // against what the server actually returns instead of the doc-derived guess
 // D-079 shipped with. See ZeptoDiscovery.kt.
+// D-096: the camera-backend compatibility spike, run once against this
+// laptop's real hardware before any capture-window UI gets built on it.
+tasks.register<JavaExec>("cameraSpike") {
+    group = "verification"
+    description = "Enumerates cameras, opens the default one, grabs one frame. Spike only - see CameraSpike.kt."
+    mainClass.set("com.secondbrain.app.CameraSpikeKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs("-Dfile.encoding=UTF-8")
+}
+
 tasks.register<JavaExec>("zeptoDiscover") {
     group = "verification"
     description = "Dumps Zepto's real tools/list (names, descriptions, schemas). Requires a completed sign-in."

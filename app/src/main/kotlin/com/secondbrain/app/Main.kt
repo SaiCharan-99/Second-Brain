@@ -256,13 +256,16 @@ private fun buildSession(): AppSession {
     // `voiceController` is assigned.
     lateinit var voiceController: VoiceController
     val askUser: suspend (String) -> VaultTools.AskResult = { question -> voiceController.handleAskUser(question) }
-    val tools = VaultTools(vault, appConfig.vault, askUser)
+    // D-092: constructed before any tool that needs it (moved up from below
+    // CalendarTools) - VaultTools/CommerceTools both read turnClock.hasImage
+    // to record real provenance instead of hardcoding VOICE.
+    val turnClock = TurnClock()
+    val tools = VaultTools(vault, appConfig.vault, askUser, turnClock)
     var builder = tools.register(ToolRegistry.builder())
     if (mailPort != null) {
         val emailTools = EmailTools(mailPort, confirmationGate) { prompt, kind -> voiceController.handleTypedInput(prompt, kind) }
         builder = emailTools.register(builder)
     }
-    val turnClock = TurnClock()
     if (calendarPort != null) {
         val calendarTools = CalendarTools(calendarPort, confirmationGate, vault, turnClock, askUser)
         builder = calendarTools.register(builder)
@@ -305,7 +308,7 @@ private fun buildSession(): AppSession {
             McpCommerceAdapter(client, oauth, deviceId)
         }
         commercePort = port
-        val commerceTools = CommerceTools(port, confirmationGate, appConfig.commerce, vault)
+        val commerceTools = CommerceTools(port, confirmationGate, appConfig.commerce, vault, turnClock)
         builder = commerceTools.register(builder)
     } else {
         log.info("commerce.enabled = false - the grocery tools are not registered.")
